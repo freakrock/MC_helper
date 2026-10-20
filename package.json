@@ -1,0 +1,13 @@
+{
+  "name": "factory-tg-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.66.0",
+    "pg": "^8.12.0",
+    "dotenv": "^16.4.0"
+  }
+}
