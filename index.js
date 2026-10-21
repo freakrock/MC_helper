@@ -95,7 +95,6 @@ function buildShipmentText(type, p) {
         shipment_deleted: '🗑 *УДАЛЕНА ОТГРУЗКА*',
     }[type] || '📦 *ОТГРУЗКА*';
 
-    // Дата (поле shipmentDate в модели)
     const date = p.shipmentDate
         ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
         : '—';
@@ -105,7 +104,6 @@ function buildShipmentText(type, p) {
     s += `📅 *Дата:* ${date}\n`;
     if (p.status) s += `📋 *Статус:* ${esc(p.status)}\n`;
 
-    // Изделие (уже популировано на заводе)
     const itemName = p.itemName || p.name || 'Без названия';
     const article = p.itemArticle || '';
     const spec = p.specification ? ` (${esc(p.specification)})` : '';
@@ -132,13 +130,11 @@ async function syncOutbox() {
         const { rows: items } = await pool.query('SELECT * FROM tg_outbox WHERE done = FALSE ORDER BY created_at ASC LIMIT 10');
         for (const item of items) {
             try {
-                // 🔄 sync = только обновить кэш, без постов в канал
                 if (item.type === 'sync') {
                     await upsertCache(item.ticket_id, item.payload);
                     await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
                     continue;
                 }
-                // 📦 События отгрузок
                 if (item.type.startsWith('shipment_')) {
                     await sendShipmentPost(item.type, item.payload);
                     await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
@@ -199,7 +195,8 @@ async function listToChat(chatId, filterKey) {
         inline_keyboard: items.map(r => {
             const p = r.payload;
             const dl = p.deadline ? ` · ⏰${daysLeft(p.deadline) < 0 ? '🔴' : ''}${new Date(p.deadline).toLocaleDateString('ru-RU')}` : '';
-            return [{ text: `${STATUS[p.status]?.split(' ')[0] || ''} ${trunc(p.subject, 32)}${dl}`, callback_data: `ticket:${r.ticket_id}` }];
+            // 🆕 Явное приведение к строке, чтобы исключить ошибки типов в callback_data
+            return [{ text: `${STATUS[p.status]?.split(' ')[0] || ''} ${trunc(p.subject, 32)}${dl}`, callback_data: `ticket:${String(r.ticket_id)}` }];
         })
     });
 }
@@ -315,19 +312,43 @@ bot.on('callback_query', async (q) => {
             const id = d.split(':')[1];
             return bot.editMessageReplyMarkup(keyboard(id), { chat_id: q.message.chat.id, message_id: q.message.message_id });
         }
+        
+        // 🆕 ХИРУРГИЧЕСКОЕ ЛОГИРОВАНИЕ ДЛЯ ДИАГНОСТИКИ
         if (d.startsWith('ticket:')) {
+            console.log('🔘 [1/5] НАЖАТ ТИКЕТ. Raw callback_data:', d);
             const id = d.split(':')[1];
-            const { rows } = await pool.query('SELECT payload FROM tg_tickets_cache WHERE ticket_id = $1', [id]);
-            if (!rows[0]) return bot.answerCallbackQuery(q.id, { text: 'Нет данных' });
-            const text = buildText(rows[0].payload);
+            console.log('🔘 [2/5] Извлечен ID:', id);
+            
             try {
+                const { rows } = await pool.query('SELECT payload FROM tg_tickets_cache WHERE ticket_id = $1', [id]);
+                console.log('🔘 [3/5] SQL запрос выполнен. Найдено строк:', rows.length);
+                
+                if (!rows || !rows[0]) {
+                    console.log('⚠️ Тикет с ID', id, 'не найден в кэше!');
+                    await bot.answerCallbackQuery(q.id, { text: '⚠️ Тикет не найден в кэше' });
+                    return;
+                }
+                
+                const p = rows[0].payload;
+                console.log('🔘 [4/5] Payload получен. Тема:', p.subject);
+                
+                const text = buildText(p);
+                console.log('🔘 [5/5] Пытаюсь отправить сообщение пользователю:', q.from.id);
+                
                 await bot.sendMessage(q.from.id, text, { parse_mode: 'Markdown', reply_markup: keyboard(id) });
+                console.log('✅ СООБЩЕНИЕ УСПЕШНО ОТПРАВЛЕНО!');
+                await bot.answerCallbackQuery(q.id);
+                
             } catch (e) {
-                console.error('❌ card send error:', e.message, '\nTEXT:', text);
-                await bot.sendMessage(q.from.id, text.replace(/[*_\\]/g, ''), { reply_markup: keyboard(id) }).catch(() => {});
+                console.error('❌ КРИТИЧЕСКАЯ ОШИБКА в блоке ticket:', e.message);
+                console.error('Stack:', e.stack);
+                try {
+                    await bot.answerCallbackQuery(q.id, { text: '⚠️ Ошибка: ' + e.message });
+                } catch (err) {}
             }
-            return bot.answerCallbackQuery(q.id);
+            return;
         }
+
         if (d.startsWith('list:')) {
             await listToChat(q.from.id, d.split(':')[1]);
             await bot.answerCallbackQuery(q.id, { text: '📨 Список отправлен в личку' });
