@@ -6,8 +6,8 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 const CHANNEL = process.env.CHANNEL_ID;
 const SUMMARY_HOUR = parseInt(process.env.SUMMARY_HOUR || '8', 10);
 
-const CAT = { equipment: '🔧 Оборудование', facility: '🏢 Помещения', tools: '🔨 Инструмент', other: '📝 Другое' };
-const STATUS = { open: '🔴 Открыт', in_progress: '🟡 В работе', resolved: '🟢 Решено', closed: '⚪ Закрыт' };
+const CAT = { equipment: ' Оборудование', facility: '🏢 Помещения', tools: '🔨 Инструмент', other: '📝 Другое' };
+const STATUS = { open: '🔴 Открыт', in_progress: '🟡 В работе', resolved: ' Решено', closed: '⚪ Закрыт' };
 const ASSIGNEES = ['Бухтияров А.С.', 'Мурадян В.А.', 'Зуев А.А.', 'Солодовников В.В.', 'Солодовников А.В.'];
 
 const esc = (t) => String(t || '').replace(/([_*\[\]()~`>#+=|{}.!\\-])/g, '\\$1');
@@ -20,10 +20,10 @@ let pool;
 
 function buildText(p) {
     const d = new Date(p.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    let s = `🆕 *ОБРАЩЕНИЕ*\n\n👤 *${esc(p.username)}*\n${CAT[p.category] || p.category}\n\n*Тема:* ${esc(p.subject)}\n${esc(trunc(p.description, 300))}\n\n📅 ${d}\n${STATUS[p.status] || p.status}`;
+    let s = ` *ОБРАЩЕНИЕ*\n\n *${esc(p.username)}*\n${CAT[p.category] || p.category}\n\n*Тема:* ${esc(p.subject)}\n${esc(trunc(p.description, 300))}\n\n ${d}\n${STATUS[p.status] || p.status}`;
     if (p.assignee) s += ` · 👷 ${esc(p.assignee)}`;
     if (p.deadline) s += ` · ⏰ до ${new Date(p.deadline).toLocaleDateString('ru-RU')}`;
-    if (p.responsesCount) s += `\n\n💬 _Ответов: ${p.responsesCount}_\nПоследний (${esc(p.lastResponse.author)}): ${esc(trunc(p.lastResponse.text, 120))}`;
+    if (p.responsesCount) s += `\n\n _Ответов: ${p.responsesCount}_\nПоследний (${esc(p.lastResponse.author)}): ${esc(trunc(p.lastResponse.text, 120))}`;
     return s;
 }
 
@@ -32,7 +32,7 @@ const keyboard = (id) => ({
         [{ text: '🟡 В работу', callback_data: `status:${id}:in_progress` }, { text: '🟢 Решено', callback_data: `status:${id}:resolved` }],
         [{ text: '🔴 Открыть', callback_data: `status:${id}:open` }, { text: '⚪ Закрыть', callback_data: `status:${id}:closed` }],
         [{ text: '👷 Назначить ▾', callback_data: `amenu:${id}` }, { text: '💬 Ответить', callback_data: `reply:${id}` }],
-        [{ text: '⏰ Срок ▾', callback_data: `dlmenu:${id}` }],
+        [{ text: ' Срок ▾', callback_data: `dlmenu:${id}` }],
     ]
 });
 
@@ -85,12 +85,10 @@ async function upsertCache(ticketId, payload) {
     );
 }
 
-// ---------- 📦 ОТГРУЗКИ ----------
-
-// ---------- 📦 ОТГРУЗКИ ----------
+// ---------- 📦 ОТГРУЗКИ (ТАБЛИЦЫ) ----------
 
 function buildShipmentText(type, p) {
-    // Обработка групповой отгрузки
+    //  ГРУППОВАЯ ОТГРУЗКА: Рисуем Markdown-таблицу
     if (type === 'shipment_created_batch' && p.items) {
         const date = p.shipmentDate
             ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -162,11 +160,13 @@ async function syncOutbox() {
         const { rows: items } = await pool.query('SELECT * FROM tg_outbox WHERE done = FALSE ORDER BY created_at ASC LIMIT 10');
         for (const item of items) {
             try {
+                // 🔄 sync = только обновить кэш, без постов в канал
                 if (item.type === 'sync') {
                     await upsertCache(item.ticket_id, item.payload);
                     await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
                     continue;
                 }
+                // 📦 События отгрузок
                 if (item.type.startsWith('shipment_')) {
                     await sendShipmentPost(item.type, item.payload);
                     await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
@@ -197,7 +197,7 @@ async function syncOutbox() {
 const FILTERS = {
     active: { label: '🔥 Активные (открытые + в работе)', test: p => p.status === 'open' || p.status === 'in_progress' },
     overdue: { label: '🔴 Просроченные', test: p => (p.status === 'open' || p.status === 'in_progress') && p.deadline && daysLeft(p.deadline) < 0 },
-    noassign: { label: '👷 Без ответственного', test: p => (p.status === 'open' || p.status === 'in_progress') && !p.assignee },
+    noassign: { label: ' Без ответственного', test: p => (p.status === 'open' || p.status === 'in_progress') && !p.assignee },
     all: { label: '📦 Все обращения', test: () => true },
 };
 
@@ -207,7 +207,7 @@ async function listToChat(chatId, filterKey) {
     
     console.log(`📋 listToChat(${filterKey}): всего в кэше ${rows.length} тикетов`);
     if (rows.length > 0) {
-        console.log('📋 Примеры:', rows.slice(0, 5).map(r => ({
+        console.log(' Примеры:', rows.slice(0, 5).map(r => ({
             id: r.ticket_id,
             status: r.payload.status,
             subject: trunc(r.payload.subject, 30)
@@ -227,7 +227,6 @@ async function listToChat(chatId, filterKey) {
         inline_keyboard: items.map(r => {
             const p = r.payload;
             const dl = p.deadline ? ` · ⏰${daysLeft(p.deadline) < 0 ? '🔴' : ''}${new Date(p.deadline).toLocaleDateString('ru-RU')}` : '';
-            // 🆕 Явное приведение к строке, чтобы исключить ошибки типов в callback_data
             return [{ text: `${STATUS[p.status]?.split(' ')[0] || ''} ${trunc(p.subject, 32)}${dl}`, callback_data: `ticket:${String(r.ticket_id)}` }];
         })
     });
@@ -246,7 +245,7 @@ async function buildSummaryText() {
 
     const dateRu = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
     let s = `☀️ *СВОДКА* — ${dateRu}\n\n`;
-    s += `📊 Активных: *${active.length}* (🔴 ${opened.length} открыто / 🟡 ${active.length - opened.length} в работе)\n`;
+    s += ` Активных: *${active.length}* ( ${opened.length} открыто /  ${active.length - opened.length} в работе)\n`;
     s += `🔴 Просрочено: *${overdue.length}* · ⏰ Срок сегодня: *${today.length}* · 🟠 Ближайшие 3 дня: *${soon.length}*\n`;
     s += `👷 Без ответственного: *${noAssign.length}*\n`;
 
@@ -258,7 +257,7 @@ async function buildSummaryText() {
     };
     if (overdue.length) s += `\n🔴 *ПРОСРОЧЕНЫ:*\n` + overdue.slice(0, 8).map(line).join('\n') + '\n';
     if (today.length) s += `\n⏰ *СРОК СЕГОДНЯ:*\n` + today.slice(0, 8).map(line).join('\n') + '\n';
-    if (soon.length) s += `\n🟠 *БЛИЖАЙШИЕ 3 ДНЯ:*\n` + soon.slice(0, 8).map(line).join('\n') + '\n';
+    if (soon.length) s += `\n *БЛИЖАЙШИЕ 3 ДНЯ:*\n` + soon.slice(0, 8).map(line).join('\n') + '\n';
     if (noAssign.length && !overdue.length && !today.length && !soon.length) {
         s += `\n👷 *БЕЗ ОТВЕТСТВЕННОГО:*\n` + noAssign.slice(0, 8).map(line).join('\n') + '\n';
     }
@@ -365,14 +364,14 @@ bot.on('callback_query', async (q) => {
                 console.log('🔘 [4/5] Payload получен. Тема:', p.subject);
                 
                 const text = buildText(p);
-                console.log('🔘 [5/5] Пытаюсь отправить сообщение пользователю:', q.from.id);
+                console.log(' [5/5] Пытаюсь отправить сообщение пользователю:', q.from.id);
                 
                 await bot.sendMessage(q.from.id, text, { parse_mode: 'Markdown', reply_markup: keyboard(id) });
                 console.log('✅ СООБЩЕНИЕ УСПЕШНО ОТПРАВЛЕНО!');
                 await bot.answerCallbackQuery(q.id);
                 
             } catch (e) {
-                console.error('❌ КРИТИЧЕСКАЯ ОШИБКА в блоке ticket:', e.message);
+                console.error(' КРИТИЧЕСКАЯ ОШИБКА в блоке ticket:', e.message);
                 console.error('Stack:', e.stack);
                 try {
                     await bot.answerCallbackQuery(q.id, { text: '⚠️ Ошибка: ' + e.message });
@@ -447,13 +446,48 @@ async function checkDeadlines() {
             const { rows: logged } = await pool.query('SELECT 1 FROM tg_reminder_log WHERE ticket_id = $1 AND kind = $2', [r.ticket_id, kind]);
             if (logged.length) continue;
             const who = p.assignee ? `👷 Ответственный: *${esc(p.assignee)}*\n` : '👷 Ответственный не назначен\n';
-            await bot.sendMessage(CHANNEL, `⏰ *НАПОМИНАНИЕ О СРОКЕ*\n\n${who}🎫 ${text}\n📅 Срок: ${new Date(p.deadline).toLocaleDateString('ru-RU')}`, {
+            await bot.sendMessage(CHANNEL, `⏰ *НАПОМИНАНИЕ О СРОКЕ*\n\n${who} ${text}\n📅 Срок: ${new Date(p.deadline).toLocaleDateString('ru-RU')}`, {
                 parse_mode: 'Markdown',
                 reply_markup: { inline_keyboard: [[{ text: '👁 Открыть тикет', callback_data: `ticket:${r.ticket_id}` }]] }
             });
             await pool.query('INSERT INTO tg_reminder_log (ticket_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING', [r.ticket_id, kind]);
         }
     } catch (e) { console.error('checkDeadlines error:', e.message); }
+}
+
+// ---------- 🚨 ТРИГГЕРНЫЕ УВЕДОМЛЕНИЯ ----------
+
+async function checkStale() {
+    try {
+        const { rows } = await pool.query('SELECT ticket_id, payload FROM tg_tickets_cache');
+        for (const r of rows) {
+            const p = r.payload;
+            if (p.status !== 'open' && p.status !== 'in_progress') continue;
+            const ageDays = Math.floor((Date.now() - new Date(p.createdAt)) / DAY);
+            if (ageDays < 1) continue;
+
+            const noReply = !p.responsesCount;
+            const kind = `stale_${ageDays}d`;
+            const { rows: logged } = await pool.query(
+                'SELECT 1 FROM tg_reminder_log WHERE ticket_id = $1 AND kind = $2', [r.ticket_id, kind]
+            );
+            if (logged.length) continue;
+
+            const who = p.assignee ? `👷 Ответственный: *${esc(p.assignee)}*\n` : '👷 Ответственный не назначен\n';
+            const reason = noReply
+                ? `⏳ *Без ответа администрации ${ageDays} дн.!*`
+                : `⏳ *Висит без закрытия ${ageDays} дн.*`;
+
+            await bot.sendMessage(CHANNEL,
+                `🚨 *ТРЕБУЕТ ВНИМАНИЯ*\n\n${reason}\n🎫 Тикет «${esc(p.subject)}» от ${esc(p.username)}\n${who}📅 Создан: ${new Date(p.createdAt).toLocaleDateString('ru-RU')}`,
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: { inline_keyboard: [[{ text: '👁 Открыть тикет', callback_data: `ticket:${r.ticket_id}` }]] }
+                }
+            ).catch(() => {});
+            await pool.query('INSERT INTO tg_reminder_log (ticket_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING', [r.ticket_id, kind]);
+        }
+    } catch (e) { console.error('checkStale error:', e.message); }
 }
 
 // ---------- УТРЕННЯЯ СВОДКА ----------
@@ -467,7 +501,7 @@ async function checkDailySummary() {
         if (logged.length) return;
         await bot.sendMessage(CHANNEL, await buildSummaryText(), {
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: '📋 Открыть список активных', callback_data: 'list:active' }]] }
+            reply_markup: { inline_keyboard: [[{ text: ' Открыть список активных', callback_data: 'list:active' }]] }
         });
         await pool.query('INSERT INTO tg_reminder_log (ticket_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING', ['__system__', kind]);
         console.log('☀️ Утренняя сводка отправлена');
@@ -482,12 +516,13 @@ async function checkDailySummary() {
     await bot.setMyCommands([
         { command: 'tickets', description: '📋 Активные обращения' },
         { command: 'overdue', description: '🔴 Просроченные' },
-        { command: 'summary', description: '☀️ Сводка на сейчас' },
+        { command: 'summary', description: '️ Сводка на сейчас' },
         { command: 'help', description: '❓ Справка' },
     ]).catch(() => {});
     setInterval(syncOutbox, 3000);
     setInterval(checkDeadlines, 30 * 60 * 1000);
     setInterval(checkDailySummary, 10 * 60 * 1000);
-    setTimeout(() => { checkDeadlines(); checkDailySummary(); }, 10000);
+    setInterval(checkStale, 30 * 60 * 1000);
+    setTimeout(() => { checkDeadlines(); checkDailySummary(); checkStale(); }, 10000);
     console.log('🤖 Бот запущен, канал:', CHANNEL, '| сводка в', SUMMARY_HOUR + ':00 МСК');
 })();
