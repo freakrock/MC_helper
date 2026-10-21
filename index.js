@@ -311,7 +311,8 @@ bot.on('callback_query', async (q) => {
         }
         if (d.startsWith('list:')) {
             await listToChat(q.from.id, d.split(':')[1]);
-            return bot.answerCallbackQuery(q.id);
+            await bot.answerCallbackQuery(q.id, { text: '📨 Список отправлен в личку' });
+            return;
         }
     } catch (e) {
         console.error('❌ callback error:', e.message);
