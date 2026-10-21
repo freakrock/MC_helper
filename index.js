@@ -95,6 +95,7 @@ function buildShipmentText(type, p) {
         shipment_deleted: '🗑 *УДАЛЕНА ОТГРУЗКА*',
     }[type] || '📦 *ОТГРУЗКА*';
 
+    // Дата (поле shipmentDate в модели)
     const date = p.shipmentDate
         ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
         : '—';
@@ -104,15 +105,16 @@ function buildShipmentText(type, p) {
     s += `📅 *Дата:* ${date}\n`;
     if (p.status) s += `📋 *Статус:* ${esc(p.status)}\n`;
 
-    const itemName = p.itemName || 'Без названия';
+    // Изделие (уже популировано на заводе)
+    const itemName = p.itemName || p.name || 'Без названия';
     const article = p.itemArticle || '';
+    const spec = p.specification ? ` (${esc(p.specification)})` : '';
     s += `\n📦 *Состав:*\n`;
-    s += `• ${esc(itemName)}${article ? ` (${esc(article)})` : ''}`;
-    if (p.quantity !== undefined && p.quantity !== null) s += ` — ${p.quantity} шт (план)`;
-    if (p.fact !== undefined && p.fact !== null) s += ` / ${p.fact} шт (факт)`;
-    s += `\n`;
+    s += `• ${esc(itemName)}${spec}${article ? ` · _${esc(article)}_` : ''}\n`;
+    s += `   План: *${p.quantity ?? '—'} шт*`;
+    if (p.fact !== undefined && p.fact !== null) s += ` / Факт: *${p.fact} шт*`;
 
-    if (p.createdBy) s += `\n👤 Оформил: ${esc(p.createdBy)}`;
+    if (p.comment) s += `\n\n💬 _${esc(p.comment)}_`;
     return s;
 }
 
@@ -174,8 +176,25 @@ const FILTERS = {
 async function listToChat(chatId, filterKey) {
     const filter = FILTERS[filterKey] || FILTERS.active;
     const { rows } = await pool.query('SELECT ticket_id, payload FROM tg_tickets_cache ORDER BY updated_at DESC');
+    
+    console.log(`📋 listToChat(${filterKey}): всего в кэше ${rows.length} тикетов`);
+    if (rows.length > 0) {
+        console.log('📋 Примеры:', rows.slice(0, 5).map(r => ({
+            id: r.ticket_id,
+            status: r.payload.status,
+            subject: trunc(r.payload.subject, 30)
+        })));
+    }
+    
     const items = rows.filter(r => filter.test(r.payload)).slice(0, 12);
-    if (items.length === 0) return bot.sendMessage(chatId, `😌 ${filter.label}: ничего не найдено`);
+    console.log(`📋 После фильтра ${filterKey}: ${items.length} шт`);
+    
+    if (items.length === 0) {
+        const hint = rows.length === 0 
+            ? '😌 Кэш пустой. Попробуй создать новый тикет в кабинете — он появится через 5 сек.'
+            : `😌 По фильтру «${filter.label}» ничего нет. Всего в базе: ${rows.length} тикетов.\n\nПопробуй «📦 Все обращения».`;
+        return bot.sendMessage(chatId, hint);
+    }
     await bot.sendMessage(chatId, `${filter.label} — ${items.length} шт. Нажми на тикет:`, {
         inline_keyboard: items.map(r => {
             const p = r.payload;
