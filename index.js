@@ -87,9 +87,41 @@ async function upsertCache(ticketId, payload) {
 
 // ---------- 📦 ОТГРУЗКИ ----------
 
+// ---------- 📦 ОТГРУЗКИ ----------
+
 function buildShipmentText(type, p) {
+    // Обработка групповой отгрузки
+    if (type === 'shipment_created_batch' && p.items) {
+        const date = p.shipmentDate
+            ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
+            : '—';
+
+        let s = `📦 *НОВАЯ ОТГРУЗКА*\n\n`;
+        if (p.customer) s += `🏢 *Заказчик:* ${esc(p.customer)}\n`;
+        s += `📅 *Дата:* ${date}\n`;
+        s += `📋 *Статус:* ${esc(p.status || 'Запланировано')}\n`;
+        
+        // Рисуем Markdown-таблицу
+        s += `\n| № | Наименование | План | Факт |\n`;
+        s += `|---|---|---|---|\n`;
+        
+        p.items.forEach((item, idx) => {
+            const name = esc(item.itemName || item.name || 'Без названия');
+            const spec = item.specification ? ` (${esc(item.specification)})` : '';
+            const qty = item.quantity ?? '—';
+            const fact = item.fact !== undefined && item.fact !== null ? item.fact : '—';
+            
+            // Экранируем спецсимволы для таблицы
+            const safeName = `${name}${spec}`.replace(/\|/g, '\\|');
+            s += `| ${idx + 1} | ${safeName} | ${qty} | ${fact} |\n`;
+        });
+
+        if (p.createdBy) s += `\n👤 Оформил: ${esc(p.createdBy)}`;
+        return s;
+    }
+
+    // Старая логика для одиночных событий (обновление, удаление и т.д.)
     const HEADER = {
-        shipment_created: '📦 *НОВАЯ ОТГРУЗКА*',
         shipment_shipped: '✅ *ОТГРУЖЕНО*',
         shipment_updated: '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*',
         shipment_deleted: '🗑 *УДАЛЕНА ОТГРУЗКА*',
@@ -102,7 +134,7 @@ function buildShipmentText(type, p) {
     let s = `${HEADER}\n\n`;
     if (p.customer) s += `🏢 *Заказчик:* ${esc(p.customer)}\n`;
     s += `📅 *Дата:* ${date}\n`;
-    if (p.status) s += `📋 *Статус:* ${esc(p.status)}\n`;
+    if (p.status) s += ` *Статус:* ${esc(p.status)}\n`;
 
     const itemName = p.itemName || p.name || 'Без названия';
     const article = p.itemArticle || '';
