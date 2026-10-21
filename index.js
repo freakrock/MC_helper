@@ -36,7 +36,7 @@ const keyboard = (id) => ({
     ]
 });
 
-// 🆕 КНОПКИ ПОД ПОЛЕМ ВВОДА (появляются после /start)
+// Кнопки под полем ввода в личке (появляются после /start)
 const mainKeyboard = {
     keyboard: [
         [{ text: '📋 Обращения' }, { text: '🔴 Просроченные' }],
@@ -93,6 +93,12 @@ async function syncOutbox() {
         const { rows: items } = await pool.query('SELECT * FROM tg_outbox WHERE done = FALSE ORDER BY created_at ASC LIMIT 10');
         for (const item of items) {
             try {
+                // sync = только обновить кэш, без постов в канал
+                if (item.type === 'sync') {
+                    await upsertCache(item.ticket_id, item.payload);
+                    await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
+                    continue;
+                }
                 const existingId = await getMessageId(item.ticket_id);
                 if (existingId) {
                     await bot.editMessageText(buildText(item.payload), {
@@ -251,7 +257,14 @@ bot.on('callback_query', async (q) => {
             const id = d.split(':')[1];
             const { rows } = await pool.query('SELECT payload FROM tg_tickets_cache WHERE ticket_id = $1', [id]);
             if (!rows[0]) return bot.answerCallbackQuery(q.id, { text: 'Нет данных' });
-            await bot.sendMessage(q.from.id, buildText(rows[0].payload), { parse_mode: 'Markdown', reply_markup: keyboard(id) });
+            const text = buildText(rows[0].payload);
+            try {
+                await bot.sendMessage(q.from.id, text, { parse_mode: 'Markdown', reply_markup: keyboard(id) });
+            } catch (e) {
+                console.error('❌ card send error:', e.message, '\nTEXT:', text);
+                // запасной вариант: без Markdown-форматирования
+                await bot.sendMessage(q.from.id, text.replace(/[*_\\]/g, ''), { reply_markup: keyboard(id) }).catch(() => {});
+            }
             return bot.answerCallbackQuery(q.id);
         }
         if (d.startsWith('list:')) {
@@ -259,6 +272,7 @@ bot.on('callback_query', async (q) => {
             return bot.answerCallbackQuery(q.id);
         }
     } catch (e) {
+        console.error('❌ callback error:', e.message);
         bot.answerCallbackQuery(q.id, { text: '⚠️ Ошибка' }).catch(() => {});
     }
 });
@@ -283,7 +297,7 @@ bot.on('message', async (msg) => {
     if (!msg.text) return;
     const t = msg.text.trim();
 
-    // 🆕 Кнопки под полем ввода
+    // Кнопки под полем ввода
     if (t === '📋 Обращения') return listToChat(msg.chat.id, 'active');
     if (t === '🔴 Просроченные') return listToChat(msg.chat.id, 'overdue');
     if (t === '👷 Без ответственного') return listToChat(msg.chat.id, 'noassign');
