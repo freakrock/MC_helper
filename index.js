@@ -16,7 +16,7 @@ const DAY = 24 * 60 * 60 * 1000;
 
 let pool;
 
-// ---------- ФОРМАТИРОВАНИЕ ----------
+// ---------- ФОРМАТИРОВАНИЕ ТИКЕТОВ ----------
 
 function buildText(p) {
     const d = new Date(p.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -36,7 +36,6 @@ const keyboard = (id) => ({
     ]
 });
 
-// Кнопки под полем ввода в личке (появляются после /start)
 const mainKeyboard = {
     keyboard: [
         [{ text: '📋 Обращения' }, { text: '🔴 Просроченные' }],
@@ -86,6 +85,44 @@ async function upsertCache(ticketId, payload) {
     );
 }
 
+// ---------- 📦 ОТГРУЗКИ ----------
+
+function buildShipmentText(type, p) {
+    const HEADER = {
+        shipment_created: '📦 *НОВАЯ ОТГРУЗКА*',
+        shipment_shipped: '✅ *ОТГРУЖЕНО*',
+        shipment_updated: '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*',
+        shipment_deleted: '🗑 *УДАЛЕНА ОТГРУЗКА*',
+    }[type] || '📦 *ОТГРУЗКА*';
+
+    const date = p.shipmentDate
+        ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' })
+        : '—';
+
+    let s = `${HEADER}\n\n`;
+    if (p.customer) s += `🏢 *Заказчик:* ${esc(p.customer)}\n`;
+    s += `📅 *Дата:* ${date}\n`;
+    if (p.status) s += `📋 *Статус:* ${esc(p.status)}\n`;
+
+    const itemName = p.itemName || 'Без названия';
+    const article = p.itemArticle || '';
+    s += `\n📦 *Состав:*\n`;
+    s += `• ${esc(itemName)}${article ? ` (${esc(article)})` : ''}`;
+    if (p.quantity !== undefined && p.quantity !== null) s += ` — ${p.quantity} шт (план)`;
+    if (p.fact !== undefined && p.fact !== null) s += ` / ${p.fact} шт (факт)`;
+    s += `\n`;
+
+    if (p.createdBy) s += `\n👤 Оформил: ${esc(p.createdBy)}`;
+    return s;
+}
+
+async function sendShipmentPost(type, payload) {
+    const text = buildShipmentText(type, payload);
+    await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown' }).catch(() => {
+        return bot.sendMessage(CHANNEL, text.replace(/[*_\\]/g, ''));
+    });
+}
+
 // ---------- СИНХРОНИЗАЦИЯ С ЗАВОДОМ ----------
 
 async function syncOutbox() {
@@ -93,9 +130,15 @@ async function syncOutbox() {
         const { rows: items } = await pool.query('SELECT * FROM tg_outbox WHERE done = FALSE ORDER BY created_at ASC LIMIT 10');
         for (const item of items) {
             try {
-                // sync = только обновить кэш, без постов в канал
+                // 🔄 sync = только обновить кэш, без постов в канал
                 if (item.type === 'sync') {
                     await upsertCache(item.ticket_id, item.payload);
+                    await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
+                    continue;
+                }
+                // 📦 События отгрузок
+                if (item.type.startsWith('shipment_')) {
+                    await sendShipmentPost(item.type, item.payload);
                     await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
                     continue;
                 }
@@ -262,7 +305,6 @@ bot.on('callback_query', async (q) => {
                 await bot.sendMessage(q.from.id, text, { parse_mode: 'Markdown', reply_markup: keyboard(id) });
             } catch (e) {
                 console.error('❌ card send error:', e.message, '\nTEXT:', text);
-                // запасной вариант: без Markdown-форматирования
                 await bot.sendMessage(q.from.id, text.replace(/[*_\\]/g, ''), { reply_markup: keyboard(id) }).catch(() => {});
             }
             return bot.answerCallbackQuery(q.id);
@@ -297,7 +339,6 @@ bot.on('message', async (msg) => {
     if (!msg.text) return;
     const t = msg.text.trim();
 
-    // Кнопки под полем ввода
     if (t === '📋 Обращения') return listToChat(msg.chat.id, 'active');
     if (t === '🔴 Просроченные') return listToChat(msg.chat.id, 'overdue');
     if (t === '👷 Без ответственного') return listToChat(msg.chat.id, 'noassign');
