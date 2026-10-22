@@ -2,7 +2,26 @@ const TelegramBot = require('node-telegram-bot-api');
 const { Pool } = require('pg');
 require('dotenv').config();
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.BOT_TOKEN, { 
+    polling: {
+        interval: 300,
+        timeout: 10,
+        params: { timeout: 10 }
+    }
+});
+
+// Тихая обработка ошибок polling (не спамит в лог)
+bot.on('polling_error', (error) => {
+    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
+        // Два бота с одним токеном — просто ждём, не логируем
+        return;
+    }
+    if (error.code === 'ETELEGRAM' && error.message.includes('429')) {
+        // Лимит запросов — тоже ждём
+        return;
+    }
+    console.error('polling_error:', error.message);
+});
 
 // 🆕 Разделяем каналы: один для тикетов, другой для отгрузок
 const CHANNEL = process.env.CHANNEL_ID; 
