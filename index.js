@@ -3,7 +3,11 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
-const CHANNEL = process.env.CHANNEL_ID;
+
+// 🆕 Разделяем каналы: один для тикетов, другой для отгрузок
+const CHANNEL = process.env.CHANNEL_ID; 
+const SHIPMENT_CHANNEL = process.env.SHIPMENT_CHANNEL_ID || CHANNEL; 
+
 const SUMMARY_HOUR = parseInt(process.env.SUMMARY_HOUR || '8', 10);
 
 const CAT = { equipment: '🔧 Оборудование', facility: '🏢 Помещения', tools: '🔨 Инструмент', other: '📝 Другое' };
@@ -71,10 +75,9 @@ async function upsertCache(ticketId, payload) {
     await pool.query(`INSERT INTO tg_tickets_cache (ticket_id, payload) VALUES ($1, $2) ON CONFLICT (ticket_id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`, [ticketId, JSON.stringify(payload)]);
 }
 
-// ---------- 📦 ОТГРУЗКИ (ТАБЛИЦЫ) ----------
+// ---------- 📦 ОТГРУЗКИ (Идут в SHIPMENT_CHANNEL) ----------
 
 function buildShipmentText(type, p) {
-    // Обработка любых пакетных отгрузок (создание, обновление, отгрузка)
     if (type.endsWith('_batch') && p.items) {
         const isShipped = type.includes('shipped');
         const isUpdated = type.includes('updated');
@@ -99,16 +102,18 @@ function buildShipmentText(type, p) {
         return s;
     }
 
-    // Старая логика для одиночных событий (на всякий случай)
     const HEADER = { shipment_shipped: '✅ *ОТГРУЖЕНО*', shipment_updated: '📊 *ОБНОВЛЕНИЕ*', shipment_deleted: '🗑 *УДАЛЕНА*' }[type] || '📦 *ОТГРУЗКА*';
     const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
     let s = `${HEADER}\n\n🏢 *Заказчик:* ${esc(p.customer)}\n📅 *Дата:* ${date}\n📦 *Состав:* ${esc(p.itemName || p.name || 'Без названия')}\nПлан: *${p.quantity ?? '—'} шт* / Факт: *${p.fact ?? '—'} шт*`;
     return s;
 }
 
+// 🆕 Отправляем отгрузки в специальный канал
 async function sendShipmentPost(type, payload) {
     const text = buildShipmentText(type, payload);
-    await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown' }).catch(() => bot.sendMessage(CHANNEL, text.replace(/[*_\\]/g, '')));
+    await bot.sendMessage(SHIPMENT_CHANNEL, text, { parse_mode: 'Markdown' }).catch(() => {
+        return bot.sendMessage(SHIPMENT_CHANNEL, text.replace(/[*_\\]/g, ''));
+    });
 }
 
 // ---------- СИНХРОНИЗАЦИЯ ----------
@@ -124,8 +129,9 @@ async function syncOutbox() {
                 if (item.type === 'sync') {
                     await upsertCache(item.ticket_id, item.payload);
                 } else if (item.type.startsWith('shipment_')) {
-                    await sendShipmentPost(item.type, item.payload);
+                    await sendShipmentPost(item.type, item.payload); // Уйдет в SHIPMENT_CHANNEL
                 } else {
+                    // Тикеты уходят в основной CHANNEL
                     const existingId = await getMessageId(item.ticket_id);
                     if (existingId) {
                         await bot.editMessageText(buildText(item.payload), { chat_id: CHANNEL, message_id: existingId, parse_mode: 'Markdown', reply_markup: keyboard(item.ticket_id) }).catch(() => {});
@@ -192,12 +198,11 @@ async function sendSummaryNow(chatId) {
 async function checkStale() {
     try {
         const now = moscowNow();
-        // Запускаем проверку проблемных тикетов строго в 09:00 утра
         if (now.hour !== 9) return; 
         
         const kind = `stale_daily_${now.date}`;
         const { rows: logged } = await pool.query('SELECT 1 FROM tg_reminder_log WHERE ticket_id = $1 AND kind = $2', ['__system__', kind]);
-        if (logged.length) return; // Уже отправляли сегодня
+        if (logged.length) return; 
 
         const { rows } = await pool.query('SELECT ticket_id, payload FROM tg_tickets_cache');
         const problematic = [];
@@ -209,19 +214,16 @@ async function checkStale() {
             const daysToDeadline = p.deadline ? daysLeft(p.deadline) : null;
             const ageDays = Math.floor((Date.now() - new Date(p.createdAt)) / DAY);
 
-            // Условие 1: Подходит срок (осталось от 0 до 3 дней)
             if (daysToDeadline !== null && daysToDeadline >= 0 && daysToDeadline <= 3) {
                 problematic.push(`⏳ *Подходит срок* (осталось ${daysToDeadline} дн.)\n🎫 «${esc(p.subject)}» (👷 ${esc(p.assignee) || 'не назначен'})`);
-            }
-            // Условие 2: Нет ответственного, нет срока, и висит > 3 дней
-            else if (!p.assignee && !p.deadline && ageDays >= 3) {
+            } else if (!p.assignee && !p.deadline && ageDays >= 3) {
                 problematic.push(`⚠️ *Требует внимания* (нет ответственного и срока, висит ${ageDays} дн.)\n🎫 «${esc(p.subject)}» от ${esc(p.username)}`);
             }
         }
 
         if (problematic.length > 0) {
             const text = `🚨 *ОТЧЁТ: ПРОБЛЕМНЫЕ ТИКЕТЫ*\n\n${problematic.slice(0, 15).join('\n\n')}${problematic.length > 15 ? `\n\n_...и ещё ${problematic.length - 15} тикетов_` : ''}`;
-            await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown' });
+            await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown' }); // Уходит в основной канал тикетов
             await pool.query('INSERT INTO tg_reminder_log (ticket_id, kind) VALUES ($1, $2) ON CONFLICT DO NOTHING', ['__system__', kind]);
             console.log('☀️ Отчёт о проблемных тикетах отправлен');
         }
@@ -328,8 +330,10 @@ bot.on('message', async (msg) => {
     
     setInterval(syncOutbox, 3000);
     setInterval(checkDailySummary, 10 * 60 * 1000);
-    setInterval(checkStale, 10 * 60 * 1000); // Проверяем каждые 10 мин, но сработает только в 09:00
+    setInterval(checkStale, 10 * 60 * 1000);
     
     setTimeout(() => { checkDailySummary(); checkStale(); }, 10000);
-    console.log('🤖 Бот запущен, канал:', CHANNEL, '| сводка в', SUMMARY_HOUR + ':00 МСК | отчёт о проблемах в 09:00 МСК');
+    console.log('🤖 Бот запущен');
+    console.log(`📋 Канал тикетов: ${CHANNEL}`);
+    console.log(`📦 Канал отгрузок: ${SHIPMENT_CHANNEL}`);
 })();
