@@ -5,7 +5,6 @@ require('dotenv').config();
 const bot = new TelegramBot(process.env.BOT_TOKEN, { 
     polling: {
         interval: 300,
-        timeout: 10,
         params: { timeout: 10 }
     }
 });
