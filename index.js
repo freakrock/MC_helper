@@ -73,7 +73,7 @@ const keyboard = (id) => ({
         [{ text: '🟡 В работу', callback_data: `status:${id}:in_progress` }, { text: '🟢 Решено', callback_data: `status:${id}:resolved` }],
         [{ text: '🔴 Открыть', callback_data: `status:${id}:open` }, { text: '⚪ Закрыть', callback_data: `status:${id}:closed` }],
         [{ text: '👷 Назначить ▾', callback_data: `amenu:${id}` }, { text: '💬 Ответить', callback_data: `reply:${id}` }],
-        [{ text: '⏰ Срок ▾', callback_data: `dlmenu:${id}` }],
+        [{ text: '⏰ Срок ', callback_data: `dlmenu:${id}` }],
     ]
 });
 
@@ -220,17 +220,39 @@ const FILTERS = {
     all: { label: '📦 Все обращения', test: () => true },
 };
 
+// 🆕 ИСПРАВЛЕНО: inline_keyboard теперь правильно обёрнут в reply_markup
 async function listToChat(chatId, filterKey) {
     const filter = FILTERS[filterKey] || FILTERS.active;
     const { rows } = await pool.query('SELECT ticket_id, payload FROM tg_tickets_cache ORDER BY updated_at DESC');
     const items = rows.filter(r => filter.test(r.payload)).slice(0, 12);
-    if (items.length === 0) return bot.sendMessage(chatId, `😌 ${filter.label}: ничего не найдено`);
+    
+    if (items.length === 0) {
+        return bot.sendMessage(chatId, `😌 ${filter.label}: ничего не найдено`);
+    }
+    
+    const inlineKeyboard = items.map(r => {
+        const p = r.payload;
+        const dl = p.deadline 
+            ? ` · ⏰${daysLeft(p.deadline) < 0 ? '🔴' : ''}${new Date(p.deadline).toLocaleDateString('ru-RU')}` 
+            : '';
+        const statusIcon = STATUS[p.status]?.split(' ')[0] || '📝';
+        const subject = trunc(p.subject || '(без темы)', 32);
+        
+        // Telegram ограничивает callback_data 64 байтами — обрезаем ticket_id если нужно
+        const ticketId = String(r.ticket_id);
+        const safeCallbackData = `ticket:${ticketId}`.length > 64 
+            ? `ticket:${ticketId.substring(0, 56)}` 
+            : `ticket:${ticketId}`;
+        
+        return [{ 
+            text: `${statusIcon} ${subject}${dl}`, 
+            callback_data: safeCallbackData 
+        }];
+    });
+    
+    // ПРАВИЛЬНО: reply_markup: { inline_keyboard: [...] }
     await bot.sendMessage(chatId, `${filter.label} — ${items.length} шт. Нажми на тикет:`, {
-        inline_keyboard: items.map(r => {
-            const p = r.payload;
-            const dl = p.deadline ? ` · ⏰${daysLeft(p.deadline) < 0 ? '🔴' : ''}${new Date(p.deadline).toLocaleDateString('ru-RU')}` : '';
-            return [{ text: `${STATUS[p.status]?.split(' ')[0] || ''} ${trunc(p.subject, 32)}${dl}`, callback_data: `ticket:${String(r.ticket_id)}` }];
-        })
+        reply_markup: { inline_keyboard: inlineKeyboard }
     });
 }
 
