@@ -177,7 +177,33 @@ async function syncOutbox() {
             
             try {
                 if (item.type === 'sync') {
-                    await upsertCache(item.ticket_id, item.payload);
+                    const payload = item.payload || {};
+                    await upsertCache(item.ticket_id, payload);
+
+                    // 🆕 Синхронизация чинит пост в канале: редактируем или отправляем заново
+                    if (payload.subject || payload.description || payload.username) {
+                        const text = buildText(payload);
+                        const existingId = await getMessageId(item.ticket_id);
+                        if (existingId) {
+                            await bot.editMessageText(text, {
+                                chat_id: CHANNEL,
+                                message_id: existingId,
+                                parse_mode: 'Markdown',
+                                reply_markup: keyboard(item.ticket_id)
+                            }).catch(() => {});
+                        } else {
+                            try {
+                                const msg = await bot.sendMessage(CHANNEL, text, {
+                                    parse_mode: 'Markdown',
+                                    reply_markup: keyboard(item.ticket_id)
+                                });
+                                await pool.query(
+                                    'INSERT INTO tg_messages (ticket_id, message_id) VALUES ($1, $2) ON CONFLICT (ticket_id) DO NOTHING',
+                                    [item.ticket_id, msg.message_id]
+                                );
+                            } catch (e) { /* тихо */ }
+                        }
+                    }
                 } else if (item.type.startsWith('shipment_')) {
                     await sendShipmentPost(item.type, item.payload); // Уйдет в SHIPMENT_CHANNEL
                 } else {
