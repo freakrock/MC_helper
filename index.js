@@ -167,16 +167,35 @@ async function sendShipmentPost(type, payload) {
 }
 
 // ---------- СИНХРОНИЗАЦИЯ OUTBOX ----------
+// ---------- СИНХРОНИЗАЦИЯ OUTBOX (с защитой от дублей) ----------
+let isSyncing = false;
+
 async function syncOutbox() {
+    if (isSyncing) return;   // предыдущий цикл ещё идёт — не наслаиваемся
+    isSyncing = true;
     try {
-        const { rows: items } = await pool.query('SELECT * FROM tg_outbox WHERE done = FALSE ORDER BY created_at ASC LIMIT 5');
+        // 🆕 Атомарно "захватываем" строки: помечаем done ДО отправки.
+        // Каждая строка достанется ровно одному экземпляру бота —
+        // даже если циклы наложатся или ботов запущено несколько.
+        const { rows: items } = await pool.query(
+            `UPDATE tg_outbox SET done = TRUE
+             WHERE id IN (
+                 SELECT id FROM tg_outbox
+                 WHERE done = FALSE
+                 ORDER BY created_at ASC
+                 LIMIT 5
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING *`
+        );
+
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
             if (i > 0) await new Promise(resolve => setTimeout(resolve, 1200)); // Защита от 429
 
             try {
                 if (item.type === 'sync') {
-                    // SYNC только обновляет кэш и чинит СУЩЕСТВУЮЩИЙ пост. Никогда не создаёт новые!
+                    // SYNC только обновляет кэш и чинит СУЩЕСТВУЮЩИЙ пост
                     const payload = item.payload || {};
                     await upsertCache(item.ticket_id, payload);
                     if (payload.subject || payload.description || payload.username) {
@@ -196,10 +215,8 @@ async function syncOutbox() {
                     // Тикеты уходят в основной CHANNEL
                     const payload = item.payload || {};
 
-                    // Защита: пустой payload — логируем и пропускаем
                     if (!payload.subject && !payload.description && !payload.username) {
                         console.warn('⚠️ Пустой payload в outbox:', item.ticket_id, JSON.stringify(payload));
-                        await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]);
                         continue;
                     }
 
@@ -208,7 +225,7 @@ async function syncOutbox() {
                     const text = buildText(payload);
                     const existingId = await getMessageId(item.ticket_id);
                     if (existingId) {
-                        // Если пост в канале удалён вручную — чиним привязку и постим заново
+                        // Если пост удалён вручную — чиним привязку и постим заново
                         const editResult = await bot.editMessageText(text, {
                             chat_id: CHANNEL,
                             message_id: existingId,
@@ -234,11 +251,20 @@ async function syncOutbox() {
                     await upsertCache(item.ticket_id, payload);
                 }
             } catch (e) {
-                if (e.message.includes('429')) break;
+                if (e.message && e.message.includes('429')) {
+                    // Попали в лимит Telegram — возвращаем событие в очередь на повтор
+                    console.warn('⚠️ 429 при отправке, событие возвращено в очередь:', item.id);
+                    await pool.query(
+                        'INSERT INTO tg_outbox (type, ticket_id, payload) VALUES ($1, $2, $3)',
+                        [item.type, item.ticket_id, JSON.stringify(item.payload)]
+                    ).catch(() => {});
+                }
             }
-            await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]).catch(() => {});
         }
     } catch (e) { /* тихо */ }
+    finally {
+        isSyncing = false;
+    }
 }
 
 // ---------- СПИСКИ И СВОДКА ----------
