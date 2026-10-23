@@ -39,12 +39,32 @@ const DAY = 24 * 60 * 60 * 1000;
 
 let pool;
 
+// 🆕 Устойчивая версия buildText с защитой от пустых данных
 function buildText(p) {
-    const d = new Date(p.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-    let s = `🆕 *ОБРАЩЕНИЕ*\n\n👤 *${esc(p.username)}*\n${CAT[p.category] || p.category}\n\n*Тема:* ${esc(p.subject)}\n${esc(trunc(p.description, 300))}\n\n📅 ${d}\n${STATUS[p.status] || p.status}`;
+    if (!p || typeof p !== 'object') {
+        return `⚠️ *ОБРАЩЕНИЕ (без данных)*\n\nТикет получен, но данные не были переданы. Проверьте backend.`;
+    }
+
+    // Fallback для username: ищем любое имя, иначе — ID или "Аноним"
+    const username = (p.username && String(p.username).trim())
+        || (p.fullName && String(p.fullName).trim())
+        || (p.firstName && String(p.firstName).trim())
+        || (p.userId && `Пользователь #${p.userId}`)
+        || 'Анонимный пользователь';
+
+    const d = p.createdAt
+        ? new Date(p.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+        : '—';
+
+    const subject = (p.subject && String(p.subject).trim()) || '(тема не указана)';
+    const description = (p.description && String(p.description).trim()) || '(описание не указано)';
+    const category = CAT[p.category] || p.category || '📝 Другое';
+    const status = STATUS[p.status] || p.status || '🔴 Открыт';
+
+    let s = `🆕 *ОБРАЩЕНИЕ*\n\n👤 *${esc(username)}*\n${category}\n\n*Тема:* ${esc(subject)}\n${esc(trunc(description, 300))}\n\n📅 ${d}\n${status}`;
     if (p.assignee) s += ` · 👷 ${esc(p.assignee)}`;
     if (p.deadline) s += ` · ⏰ до ${new Date(p.deadline).toLocaleDateString('ru-RU')}`;
-    if (p.responsesCount) s += `\n\n💬 _Ответов: ${p.responsesCount}_\nПоследний (${esc(p.lastResponse.author)}): ${esc(trunc(p.lastResponse.text, 120))}`;
+    if (p.responsesCount) s += `\n\n💬 _Ответов: ${p.responsesCount}_\nПоследний (${esc(p.lastResponse?.author || '?')}): ${esc(trunc(p.lastResponse?.text || '', 120))}`;
     return s;
 }
 
@@ -127,12 +147,23 @@ function buildShipmentText(type, p) {
     return s;
 }
 
-// 🆕 Отправляем отгрузки в специальный канал
+// 🆕 Отправляем отгрузки в специальный канал (с защитой от пустых данных)
 async function sendShipmentPost(type, payload) {
+    if (!payload || (!payload.customer && !payload.items?.length)) {
+        console.warn('⚠️ Пустая отгрузка:', type, JSON.stringify(payload));
+        return;
+    }
     const text = buildShipmentText(type, payload);
-    await bot.sendMessage(SHIPMENT_CHANNEL, text, { parse_mode: 'Markdown' }).catch(() => {
-        return bot.sendMessage(SHIPMENT_CHANNEL, text.replace(/[*_\\]/g, ''));
-    });
+    try {
+        await bot.sendMessage(SHIPMENT_CHANNEL, text, { parse_mode: 'Markdown' });
+    } catch (e) {
+        // Если Markdown сломался — шлём без разметки (один раз, без fallback-дубля)
+        if (e.message && e.message.includes('400')) {
+            await bot.sendMessage(SHIPMENT_CHANNEL, text.replace(/[*_\\]/g, '')).catch(() => {});
+        } else {
+            console.error('sendShipmentPost error:', e.message);
+        }
+    }
 }
 
 // ---------- СИНХРОНИЗАЦИЯ ----------
@@ -151,14 +182,27 @@ async function syncOutbox() {
                     await sendShipmentPost(item.type, item.payload); // Уйдет в SHIPMENT_CHANNEL
                 } else {
                     // Тикеты уходят в основной CHANNEL
+                    const payload = item.payload || {};
+
+                    // 🆕 Защита: если payload пустой или без ключевых полей — логируем и пропускаем
+                    if (!payload.subject && !payload.description && !payload.username) {
+                        console.warn('⚠️ Пустой payload в outbox:', item.ticket_id, JSON.stringify(payload));
+                        await pool.query('UPDATE tg_outbox SET done = TRUE WHERE id = $1', [item.id]);
+                        continue;
+                    }
+
+                    // 🆕 Логируем имя пользователя для отладки
+                    console.log(`📤 Тикет ${item.ticket_id}: user="${payload.username || 'UNDEFINED'}", subject="${(payload.subject || '').substring(0, 40)}"`);
+
+                    const text = buildText(payload);
                     const existingId = await getMessageId(item.ticket_id);
                     if (existingId) {
-                        await bot.editMessageText(buildText(item.payload), { chat_id: CHANNEL, message_id: existingId, parse_mode: 'Markdown', reply_markup: keyboard(item.ticket_id) }).catch(() => {});
+                        await bot.editMessageText(text, { chat_id: CHANNEL, message_id: existingId, parse_mode: 'Markdown', reply_markup: keyboard(item.ticket_id) }).catch(() => {});
                     } else {
-                        const msg = await bot.sendMessage(CHANNEL, buildText(item.payload), { parse_mode: 'Markdown', reply_markup: keyboard(item.ticket_id) });
+                        const msg = await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown', reply_markup: keyboard(item.ticket_id) });
                         await pool.query('INSERT INTO tg_messages (ticket_id, message_id) VALUES ($1, $2) ON CONFLICT (ticket_id) DO NOTHING', [item.ticket_id, msg.message_id]);
                     }
-                    await upsertCache(item.ticket_id, item.payload);
+                    await upsertCache(item.ticket_id, payload);
                 }
             } catch (e) { 
                 if (e.message.includes('429')) break; 
