@@ -15,12 +15,13 @@ bot.on('polling_error', (error) => {
     console.error('polling_error:', error.message);
 });
 
-// 🆕 Три канала: тикеты, отгрузки, заявки на инструмент
+// Каналы
 const CHANNEL = process.env.CHANNEL_ID;
 const SHIPMENT_CHANNEL = process.env.SHIPMENT_CHANNEL_ID || CHANNEL;
 const TOOL_CHANNEL = process.env.TOOL_CHANNEL_ID || CHANNEL;
 
 const SUMMARY_HOUR = parseInt(process.env.SUMMARY_HOUR || '8', 10);
+const INITIAL_ADMIN_ID = process.env.INITIAL_ADMIN_ID; // 🆕 ID первого админа
 
 const CAT = { equipment: '🔧 Оборудование', facility: '🏢 Помещения', tools: '🔨 Инструмент', other: '📝 Другое' };
 const STATUS = { open: '🔴 Открыт', in_progress: '🟡 В работе', resolved: '🟢 Решено', closed: '⚪ Закрыт' };
@@ -31,6 +32,75 @@ const trunc = (t, n) => (t && t.length > n ? t.substring(0, n) + '…' : t || ''
 const DAY = 24 * 60 * 60 * 1000;
 
 let pool;
+
+// 🆕 ========== СИСТЕМА АДМИНИСТРАТОРОВ ==========
+
+// Создать таблицу админов
+async function initAdminsTable() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS tg_admins (
+            user_id BIGINT PRIMARY KEY,
+            username VARCHAR(128),
+            added_at TIMESTAMPTZ DEFAULT NOW()
+        );
+    `);
+    
+    // 🆕 Добавить первичного админа, если он задан и ещё не существует
+    if (INITIAL_ADMIN_ID) {
+        const { rows } = await pool.query(
+            'SELECT 1 FROM tg_admins WHERE user_id = $1',
+            [INITIAL_ADMIN_ID]
+        );
+        if (rows.length === 0) {
+            await pool.query(
+                'INSERT INTO tg_admins (user_id, username) VALUES ($1, $2)',
+                [INITIAL_ADMIN_ID, 'Первичный админ']
+            );
+            console.log(`✅ Первичный админ добавлен: ${INITIAL_ADMIN_ID}`);
+        }
+    }
+}
+
+// Проверка: является ли пользователь админом
+async function isAdmin(userId) {
+    if (!userId) return false;
+    const { rows } = await pool.query(
+        'SELECT 1 FROM tg_admins WHERE user_id = $1',
+        [userId]
+    );
+    return rows.length > 0;
+}
+
+// Добавить админа
+async function addAdmin(userId, username) {
+    await pool.query(
+        'INSERT INTO tg_admins (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username',
+        [userId, username]
+    );
+}
+
+// Удалить админа
+async function removeAdmin(userId) {
+    await pool.query('DELETE FROM tg_admins WHERE user_id = $1', [userId]);
+}
+
+// Получить список всех админов
+async function getAdmins() {
+    const { rows } = await pool.query('SELECT user_id, username, added_at FROM tg_admins ORDER BY added_at');
+    return rows;
+}
+
+// Получить имя пользователя из Telegram
+async function getUserFullName(userId) {
+    try {
+        const member = await bot.getChatMember(CHANNEL, userId);
+        const user = member.user;
+        return [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || `ID:${user.id}`;
+    } catch (e) {
+        return `ID:${userId}`;
+    }
+}
+// 🆕 ========== КОНЕЦ СИСТЕМЫ АДМИНИСТРАТОРОВ ==========
 
 // ---------- ФОРМИРОВАНИЕ ТЕКСТА ТИКЕТА ----------
 function buildText(p) {
@@ -92,6 +162,7 @@ async function initDb() {
     await pool.query(`CREATE TABLE IF NOT EXISTS tg_messages (ticket_id VARCHAR(64) PRIMARY KEY, message_id BIGINT NOT NULL);`);
     await pool.query(`CREATE TABLE IF NOT EXISTS tg_tickets_cache (ticket_id VARCHAR(64) PRIMARY KEY, payload JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW());`);
     await pool.query(`CREATE TABLE IF NOT EXISTS tg_reminder_log (ticket_id VARCHAR(64), kind VARCHAR(24), PRIMARY KEY (ticket_id, kind));`);
+    await initAdminsTable(); // 🆕 Инициализация таблицы админов
 }
 
 async function getMessageId(ticketId) {
@@ -151,7 +222,7 @@ async function sendShipmentPost(type, payload) {
     }
 }
 
-// ---------- 🛠️ ЗАЯВКИ НА ИНСТРУМЕНТ ОТ СОТРУДНИКОВ (🆕) ----------
+// ---------- 🛠️ ЗАЯВКИ НА ИНСТРУМЕНТ ОТ СОТРУДНИКОВ ----------
 const TOOLREQ_REASON = { wear: '📉 Износ', broken: '💥 Поломка', new_op: '🆕 Новая операция', other: '📝 Другое' };
 const TOOLREQ_STATUS = {
     pending: '🟡 Ожидает одобрения',
@@ -182,7 +253,7 @@ function buildToolRequestText(p) {
 }
 
 const toolReqKeyboard = (id, status) => {
-    if (status !== 'pending') return { inline_keyboard: [] }; // кнопки исчезают после решения
+    if (status !== 'pending') return { inline_keyboard: [] };
     return {
         inline_keyboard: [
             [{ text: '✅ Одобрить и на склад', callback_data: `toolreq_approve:${id}` }],
@@ -201,7 +272,6 @@ async function sendToolRequestPost(item) {
 
     try {
         if (item.type === 'employee_tool_request' && !existingId) {
-            // Новая заявка — создаём пост в TOOL_CHANNEL
             const msg = await bot.sendMessage(TOOL_CHANNEL, text, {
                 parse_mode: 'Markdown',
                 reply_markup: toolReqKeyboard(id, p.status || 'pending')
@@ -211,14 +281,12 @@ async function sendToolRequestPost(item) {
                 [mapId, msg.message_id]
             );
         } else if (existingId) {
-            // Обновление (одобрено/отклонено/отправлено на склад) — правим тот же пост
             await bot.editMessageText(text, {
                 chat_id: TOOL_CHANNEL,
                 message_id: existingId,
                 parse_mode: 'Markdown',
                 reply_markup: toolReqKeyboard(id, p.status || 'pending')
             }).catch((e) => {
-                // Если пост удалён — пересоздаём
                 if (e.message && e.message.includes('not found')) {
                     bot.sendMessage(TOOL_CHANNEL, text, {
                         parse_mode: 'Markdown',
@@ -233,7 +301,6 @@ async function sendToolRequestPost(item) {
             });
         }
     } catch (e) {
-        // Markdown сломался — шлём без разметки
         if (e.message && e.message.includes('400')) {
             const safeText = text.replace(/[*_\\]/g, '');
             if (existingId) {
@@ -276,11 +343,9 @@ async function syncOutbox() {
             if (i > 0) await new Promise(resolve => setTimeout(resolve, 1200));
 
             try {
-                // 🆕 ЗАЯВКИ НА ИНСТРУМЕНТ → TOOL_CHANNEL
                 if (item.type === 'employee_tool_request' || item.type === 'employee_tool_request_updated') {
                     await sendToolRequestPost(item);
                 }
-                // SYNC только обновляет кэш и чинит СУЩЕСТВУЮЩИЙ пост
                 else if (item.type === 'sync') {
                     const payload = item.payload || {};
                     await upsertCache(item.ticket_id, payload);
@@ -296,12 +361,9 @@ async function syncOutbox() {
                         }
                     }
                 }
-                // 📦 Отгрузки → SHIPMENT_CHANNEL
-                // 📦 Отгрузки → SHIPMENT_CHANNEL
                 else if (item.type.startsWith('shipment_')) {
                     await sendShipmentPost(item.type, item.payload);
                 }
-                // 🆕 ДОБАВИТЬ ВОТ ЭТОТ БЛОК: Заявки из веб-версии (без кнопок)
                 else if (item.type === 'web_tool_request') {
                     const p = item.payload || {};
                     const itemsList = (p.items || []).map((it, i) => 
@@ -320,15 +382,12 @@ async function syncOutbox() {
                         await bot.sendMessage(TOOL_CHANNEL, text, { parse_mode: 'Markdown' });
                     } catch (e) {
                         console.error('Ошибка отправки web_tool_request:', e.message);
-                        // Если Markdown сломался, отправляем простой текст
                         if (e.message && e.message.includes('400')) {
                             await bot.sendMessage(TOOL_CHANNEL, text.replace(/[*_\\]/g, '')).catch(() => {});
                         }
                     }
                 }
-                // 📋 Обычные тикеты → CHANNEL
                 else {
-                    // ... (твой существующий код для обычных тикетов)
                     const payload = item.payload || {};
                     if (!payload.subject && !payload.description && !payload.username) {
                         console.warn('⚠️ Пустой payload в outbox:', item.ticket_id, JSON.stringify(payload));
@@ -476,12 +535,82 @@ async function checkDailySummary() {
     } catch (e) { console.error('daily summary error:', e.message); }
 }
 
+// 🆕 ========== ОБРАБОТЧИКИ КОМАНД АДМИНИСТРАТОРОВ ==========
+bot.onText(/\/admin_add/, async (msg) => {
+    const userId = msg.from.id;
+    if (!(await isAdmin(userId))) {
+        return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для выполнения этой команды.');
+    }
+    
+    // Формат: /admin_add 123456789 Иванов И.И.
+    const parts = msg.text.split(' ');
+    if (parts.length < 2) {
+        return bot.sendMessage(msg.chat.id, '📝 Использование: `/admin_add <user_id> [имя]`', { parse_mode: 'Markdown' });
+    }
+    
+    const newAdminId = parseInt(parts[1], 10);
+    const newAdminName = parts.slice(2).join(' ') || 'Админ';
+    
+    if (isNaN(newAdminId)) {
+        return bot.sendMessage(msg.chat.id, '❌ Неверный формат ID. ID должен быть числом.');
+    }
+    
+    await addAdmin(newAdminId, newAdminName);
+    bot.sendMessage(msg.chat.id, `✅ Пользователь *${esc(newAdminName)}* (ID: \`${newAdminId}\`) добавлен в список администраторов.`, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/admin_remove/, async (msg) => {
+    const userId = msg.from.id;
+    if (!(await isAdmin(userId))) {
+        return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для выполнения этой команды.');
+    }
+    
+    const parts = msg.text.split(' ');
+    if (parts.length < 2) {
+        return bot.sendMessage(msg.chat.id, '📝 Использование: `/admin_remove <user_id>`', { parse_mode: 'Markdown' });
+    }
+    
+    const removeId = parseInt(parts[1], 10);
+    if (isNaN(removeId)) {
+        return bot.sendMessage(msg.chat.id, '❌ Неверный формат ID.');
+    }
+    
+    if (removeId === userId) {
+        return bot.sendMessage(msg.chat.id, '⚠️ Вы не можете удалить сами себя из списка администраторов.');
+    }
+    
+    await removeAdmin(removeId);
+    bot.sendMessage(msg.chat.id, `✅ Пользователь с ID \`${removeId}\` удалён из списка администраторов.`, { parse_mode: 'Markdown' });
+});
+
+bot.onText(/\/admins/, async (msg) => {
+    const userId = msg.from.id;
+    if (!(await isAdmin(userId))) {
+        return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для просмотра списка администраторов.');
+    }
+    
+    const admins = await getAdmins();
+    if (admins.length === 0) {
+        return bot.sendMessage(msg.chat.id, '📋 Список администраторов пуст.');
+    }
+    
+    let text = '👥 *Список администраторов:*\n\n';
+    admins.forEach((a, i) => {
+        text += `${i + 1}. *${esc(a.username)}* (ID: \`${a.user_id}\`)\n   Добавлен: ${new Date(a.added_at).toLocaleDateString('ru-RU')}\n`;
+    });
+    
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+});
+// 🆕 ========== КОНЕЦ ОБРАБОТЧИКОВ АДМИНИСТРАТОРОВ ==========
+
 // ---------- ОБРАБОТЧИКИ КНОПОК ----------
 const replyWait = new Map();
 bot.on('callback_query', async (q) => {
     const d = q.data;
+    const userId = q.from.id;
+    
     try {
-        // 🆕 КНОПКИ ЗАЯВОК НА ИНСТРУМЕНТ
+        // 🆕 КНОПКИ ЗАЯВОК НА ИНСТРУМЕНТ (без проверки админа — там своя логика)
         if (d.startsWith('toolreq_approve:') || d.startsWith('toolreq_reject:')) {
             const [action, id] = d.split(':');
             const act = action === 'toolreq_approve' ? 'tool_request_approve' : 'tool_request_reject';
@@ -495,6 +624,18 @@ bot.on('callback_query', async (q) => {
                     ? '✅ Команда одобрения поставлена в очередь'
                     : '❌ Отклонение записано'
             });
+        }
+
+        // 🆕 ПРОВЕРКА АДМИНА ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ С ТИКЕТАМИ
+        if (d.startsWith('status:') || d.startsWith('amenu:') || d.startsWith('assign:') || 
+            d.startsWith('dlmenu:') || d.startsWith('dl:') || d.startsWith('reply:')) {
+            
+            if (!(await isAdmin(userId))) {
+                return bot.answerCallbackQuery(q.id, { 
+                    text: '⛔ У вас нет прав для управления тикетами',
+                    show_alert: true 
+                });
+            }
         }
 
         if (d.startsWith('status:')) {
@@ -590,7 +731,10 @@ bot.on('message', async (msg) => {
     await initDb();
     await bot.setMyCommands([
         { command: 'tickets', description: '📋 Активные' },
-        { command: 'summary', description: '☀️ Сводка' }
+        { command: 'summary', description: '☀️ Сводка' },
+        { command: 'admins', description: '👥 Список админов' },
+        { command: 'admin_add', description: '➕ Добавить админа' },
+        { command: 'admin_remove', description: '➖ Удалить админа' }
     ]).catch(() => {});
 
     setInterval(syncOutbox, 3000);
@@ -602,4 +746,5 @@ bot.on('message', async (msg) => {
     console.log(`📋 Канал тикетов: ${CHANNEL}`);
     console.log(`📦 Канал отгрузок: ${SHIPMENT_CHANNEL}`);
     console.log(`🛠️ Канал заявок на инструмент: ${TOOL_CHANNEL}`);
+    console.log(`👑 Первичный админ: ${INITIAL_ADMIN_ID || 'не задан'}`);
 })();
