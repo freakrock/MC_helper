@@ -297,11 +297,38 @@ async function syncOutbox() {
                     }
                 }
                 // 📦 Отгрузки → SHIPMENT_CHANNEL
+                // 📦 Отгрузки → SHIPMENT_CHANNEL
                 else if (item.type.startsWith('shipment_')) {
                     await sendShipmentPost(item.type, item.payload);
                 }
+                // 🆕 ДОБАВИТЬ ВОТ ЭТОТ БЛОК: Заявки из веб-версии (без кнопок)
+                else if (item.type === 'web_tool_request') {
+                    const p = item.payload || {};
+                    const itemsList = (p.items || []).map((it, i) => 
+                        `${i + 1}. ${it.toolName} — ${it.orderQuantity || it.quantity} шт`
+                    ).join('\n');
+
+                    const text = `🌐 *НОВАЯ ЗАЯВКА ИЗ ВЕБ-ВЕРСИИ*\n\n` +
+                                 `👤 *Инициатор:* ${p.createdBy || 'Технолог'}\n` +
+                                 `📦 *Позиций:* ${p.items?.length || 0}\n` +
+                                 `🔢 *Всего штук:* ${p.totalOrderQty || 0}\n` +
+                                 `📝 *Комментарий:* ${p.note || '—'}\n\n` +
+                                 `*Состав:*\n${itemsList}\n\n` +
+                                 `_✅ Заявка уже создана и передана на склад._`;
+
+                    try {
+                        await bot.sendMessage(TOOL_CHANNEL, text, { parse_mode: 'Markdown' });
+                    } catch (e) {
+                        console.error('Ошибка отправки web_tool_request:', e.message);
+                        // Если Markdown сломался, отправляем простой текст
+                        if (e.message && e.message.includes('400')) {
+                            await bot.sendMessage(TOOL_CHANNEL, text.replace(/[*_\\]/g, '')).catch(() => {});
+                        }
+                    }
+                }
                 // 📋 Обычные тикеты → CHANNEL
                 else {
+                    // ... (твой существующий код для обычных тикетов)
                     const payload = item.payload || {};
                     if (!payload.subject && !payload.description && !payload.username) {
                         console.warn('⚠️ Пустой payload в outbox:', item.ticket_id, JSON.stringify(payload));
