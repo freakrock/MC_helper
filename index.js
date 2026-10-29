@@ -5,26 +5,20 @@ require('dotenv').config();
 const bot = new TelegramBot(process.env.BOT_TOKEN, {
     polling: {
         interval: 300,
-        params: { timeout: 10 }   // без устаревшего options.polling.timeout
+        params: { timeout: 10 }
     }
 });
 
-// Тихая обработка ошибок polling (не спамит в лог)
 bot.on('polling_error', (error) => {
-    if (error.code === 'ETELEGRAM' && error.message.includes('409')) {
-        // Два бота с одним токеном — просто ждём, не логируем
-        return;
-    }
-    if (error.code === 'ETELEGRAM' && error.message.includes('429')) {
-        // Лимит запросов — тоже ждём
-        return;
-    }
+    if (error.code === 'ETELEGRAM' && error.message.includes('409')) return;
+    if (error.code === 'ETELEGRAM' && error.message.includes('429')) return;
     console.error('polling_error:', error.message);
 });
 
-// Разделяем каналы: один для тикетов, другой для отгрузок
+// 🆕 Три канала: тикеты, отгрузки, заявки на инструмент
 const CHANNEL = process.env.CHANNEL_ID;
 const SHIPMENT_CHANNEL = process.env.SHIPMENT_CHANNEL_ID || CHANNEL;
+const TOOL_CHANNEL = process.env.TOOL_CHANNEL_ID || CHANNEL;
 
 const SUMMARY_HOUR = parseInt(process.env.SUMMARY_HOUR || '8', 10);
 
@@ -38,28 +32,23 @@ const DAY = 24 * 60 * 60 * 1000;
 
 let pool;
 
-// ---------- ФОРМИРОВАНИЕ ТЕКСТА ТИКЕТА (устойчиво к пустым данным) ----------
+// ---------- ФОРМИРОВАНИЕ ТЕКСТА ТИКЕТА ----------
 function buildText(p) {
     if (!p || typeof p !== 'object') {
         return `⚠️ *ОБРАЩЕНИЕ (без данных)*\n\nТикет получен, но данные не были переданы. Проверьте backend.`;
     }
-
-    // Fallback для username: ищем любое имя, иначе — ID или "Аноним"
     const username = (p.username && String(p.username).trim())
         || (p.fullName && String(p.fullName).trim())
         || (p.firstName && String(p.firstName).trim())
         || (p.userId && `Пользователь #${p.userId}`)
         || 'Анонимный пользователь';
-
     const d = p.createdAt
         ? new Date(p.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
         : '—';
-
     const subject = (p.subject && String(p.subject).trim()) || '(тема не указана)';
     const description = (p.description && String(p.description).trim()) || '(описание не указано)';
     const category = CAT[p.category] || p.category || '📝 Другое';
     const status = STATUS[p.status] || p.status || '🔴 Открыт';
-
     let s = `🆕 *ОБРАЩЕНИЕ*\n\n👤 *${esc(username)}*\n${category}\n\n*Тема:* ${esc(subject)}\n${esc(trunc(description, 300))}\n\n📅 ${d}\n${status}`;
     if (p.assignee) s += ` · 👷 ${esc(p.assignee)}`;
     if (p.deadline) s += ` · ⏰ до ${new Date(p.deadline).toLocaleDateString('ru-RU')}`;
@@ -118,20 +107,18 @@ async function upsertCache(ticketId, payload) {
     );
 }
 
-// ---------- 📦 ОТГРУЗКИ (идут в SHIPMENT_CHANNEL) ----------
+// ---------- 📦 ОТГРУЗКИ ----------
 function buildShipmentText(type, p) {
     if (type.endsWith('_batch') && p.items) {
         const isShipped = type.includes('shipped');
         const isUpdated = type.includes('updated');
         const HEADER = isShipped ? '✅ *ОТГРУЖЕНО*' : (isUpdated ? '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*' : '📦 *НОВАЯ ОТГРУЗКА*');
-
         const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
         let s = `${HEADER}\n\n`;
         if (p.customer) s += `🏢 *Заказчик:* ${esc(p.customer)}\n`;
         s += `📅 *Дата:* ${date}\n`;
         s += `📋 *Статус:* ${esc(p.status || 'Запланировано')}\n`;
         s += `\n| № | Наименование | План | Факт |\n|---|---|---|---|\n`;
-
         p.items.forEach((item, idx) => {
             const name = esc(item.itemName || item.name || 'Без названия');
             const spec = item.specification ? ` (${esc(item.specification)})` : '';
@@ -142,7 +129,6 @@ function buildShipmentText(type, p) {
         });
         return s;
     }
-
     const HEADER = { shipment_shipped: '✅ *ОТГРУЖЕНО*', shipment_updated: '📊 *ОБНОВЛЕНИЕ*', shipment_deleted: '🗑 *УДАЛЕНА*' }[type] || '📦 *ОТГРУЗКА*';
     const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
     return `${HEADER}\n\n🏢 *Заказчик:* ${esc(p.customer)}\n📅 *Дата:* ${date}\n📦 *Состав:* ${esc(p.itemName || p.name || 'Без названия')}\nПлан: *${p.quantity ?? '—'} шт* / Факт: *${p.fact ?? '—'} шт*`;
@@ -157,7 +143,6 @@ async function sendShipmentPost(type, payload) {
     try {
         await bot.sendMessage(SHIPMENT_CHANNEL, text, { parse_mode: 'Markdown' });
     } catch (e) {
-        // Если Markdown сломался — шлём без разметки (один раз, без дубля)
         if (e.message && e.message.includes('400')) {
             await bot.sendMessage(SHIPMENT_CHANNEL, text.replace(/[*_\\]/g, '')).catch(() => {});
         } else {
@@ -166,17 +151,114 @@ async function sendShipmentPost(type, payload) {
     }
 }
 
+// ---------- 🛠️ ЗАЯВКИ НА ИНСТРУМЕНТ ОТ СОТРУДНИКОВ (🆕) ----------
+const TOOLREQ_REASON = { wear: '📉 Износ', broken: '💥 Поломка', new_op: '🆕 Новая операция', other: '📝 Другое' };
+const TOOLREQ_STATUS = {
+    pending: '🟡 Ожидает одобрения',
+    approved: '✅ Одобрена',
+    rejected: '❌ Отклонена',
+    sent_to_warehouse: '📦 Отправлена на склад',
+};
+
+function buildToolRequestText(p) {
+    if (!p || typeof p !== 'object') return '⚠️ Заявка без данных';
+    const d = p.createdAt
+        ? new Date(p.createdAt).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+        : '—';
+    const items = (p.items || []).map((it, i) =>
+        `${i + 1}\\. ${esc(it.toolName || '?')} — *${it.quantity} шт*`
+    ).join('\n');
+    let s = `🛠️ *ЗАЯВКА НА ИНСТРУМЕНТ*\n\n`;
+    s += `👤 *${esc(p.employeeName || 'Сотрудник')}*\n`;
+    s += `🏭 Оборудование: ${esc(p.equipmentName || '?')}\n`;
+    if (p.productName) s += `⚙️ Деталь: ${esc(p.productName)}\n`;
+    s += `📅 ${d}\n\n*Состав:*\n${items || '_пусто_'}\n\n`;
+    s += `📝 Причина: ${TOOLREQ_REASON[p.reason] || esc(p.reason || '—')}`;
+    if (p.comment) s += `\n💬 ${esc(trunc(p.comment, 200))}`;
+    s += `\n\n${TOOLREQ_STATUS[p.status] || p.status || '—'}`;
+    if (p.approvedBy) s += ` · 👤 ${esc(p.approvedBy)}`;
+    if (p.rejectComment) s += `\n⚠️ _${esc(trunc(p.rejectComment, 200))}_`;
+    return s;
+}
+
+const toolReqKeyboard = (id, status) => {
+    if (status !== 'pending') return { inline_keyboard: [] }; // кнопки исчезают после решения
+    return {
+        inline_keyboard: [
+            [{ text: '✅ Одобрить и на склад', callback_data: `toolreq_approve:${id}` }],
+            [{ text: '❌ Отклонить', callback_data: `toolreq_reject:${id}` }],
+        ]
+    };
+};
+
+async function sendToolRequestPost(item) {
+    const p = item.payload || {};
+    const id = String(p._id || '').replace('toolreq_', '');
+    if (!id) return;
+    const mapId = `toolreq_${id}`;
+    const text = buildToolRequestText(p);
+    const existingId = await getMessageId(mapId);
+
+    try {
+        if (item.type === 'employee_tool_request' && !existingId) {
+            // Новая заявка — создаём пост в TOOL_CHANNEL
+            const msg = await bot.sendMessage(TOOL_CHANNEL, text, {
+                parse_mode: 'Markdown',
+                reply_markup: toolReqKeyboard(id, p.status || 'pending')
+            });
+            await pool.query(
+                'INSERT INTO tg_messages (ticket_id, message_id) VALUES ($1, $2) ON CONFLICT (ticket_id) DO UPDATE SET message_id = EXCLUDED.message_id',
+                [mapId, msg.message_id]
+            );
+        } else if (existingId) {
+            // Обновление (одобрено/отклонено/отправлено на склад) — правим тот же пост
+            await bot.editMessageText(text, {
+                chat_id: TOOL_CHANNEL,
+                message_id: existingId,
+                parse_mode: 'Markdown',
+                reply_markup: toolReqKeyboard(id, p.status || 'pending')
+            }).catch((e) => {
+                // Если пост удалён — пересоздаём
+                if (e.message && e.message.includes('not found')) {
+                    bot.sendMessage(TOOL_CHANNEL, text, {
+                        parse_mode: 'Markdown',
+                        reply_markup: toolReqKeyboard(id, p.status || 'pending')
+                    }).then(msg => {
+                        pool.query(
+                            'INSERT INTO tg_messages (ticket_id, message_id) VALUES ($1, $2) ON CONFLICT (ticket_id) DO UPDATE SET message_id = EXCLUDED.message_id',
+                            [mapId, msg.message_id]
+                        ).catch(() => {});
+                    }).catch(() => {});
+                }
+            });
+        }
+    } catch (e) {
+        // Markdown сломался — шлём без разметки
+        if (e.message && e.message.includes('400')) {
+            const safeText = text.replace(/[*_\\]/g, '');
+            if (existingId) {
+                await bot.editMessageText(safeText, {
+                    chat_id: TOOL_CHANNEL, message_id: existingId,
+                    reply_markup: toolReqKeyboard(id, p.status || 'pending')
+                }).catch(() => {});
+            } else {
+                await bot.sendMessage(TOOL_CHANNEL, safeText, {
+                    reply_markup: toolReqKeyboard(id, p.status || 'pending')
+                }).catch(() => {});
+            }
+        } else {
+            console.error('sendToolRequestPost error:', e.message);
+        }
+    }
+}
+
 // ---------- СИНХРОНИЗАЦИЯ OUTBOX ----------
-// ---------- СИНХРОНИЗАЦИЯ OUTBOX (с защитой от дублей) ----------
 let isSyncing = false;
 
 async function syncOutbox() {
-    if (isSyncing) return;   // предыдущий цикл ещё идёт — не наслаиваемся
+    if (isSyncing) return;
     isSyncing = true;
     try {
-        // 🆕 Атомарно "захватываем" строки: помечаем done ДО отправки.
-        // Каждая строка достанется ровно одному экземпляру бота —
-        // даже если циклы наложатся или ботов запущено несколько.
         const { rows: items } = await pool.query(
             `UPDATE tg_outbox SET done = TRUE
              WHERE id IN (
@@ -191,11 +273,15 @@ async function syncOutbox() {
 
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
-            if (i > 0) await new Promise(resolve => setTimeout(resolve, 1200)); // Защита от 429
+            if (i > 0) await new Promise(resolve => setTimeout(resolve, 1200));
 
             try {
-                if (item.type === 'sync') {
-                    // SYNC только обновляет кэш и чинит СУЩЕСТВУЮЩИЙ пост
+                // 🆕 ЗАЯВКИ НА ИНСТРУМЕНТ → TOOL_CHANNEL
+                if (item.type === 'employee_tool_request' || item.type === 'employee_tool_request_updated') {
+                    await sendToolRequestPost(item);
+                }
+                // SYNC только обновляет кэш и чинит СУЩЕСТВУЮЩИЙ пост
+                else if (item.type === 'sync') {
                     const payload = item.payload || {};
                     await upsertCache(item.ticket_id, payload);
                     if (payload.subject || payload.description || payload.username) {
@@ -209,30 +295,28 @@ async function syncOutbox() {
                             }).catch(() => {});
                         }
                     }
-                } else if (item.type.startsWith('shipment_')) {
-                    await sendShipmentPost(item.type, item.payload); // Уходит в SHIPMENT_CHANNEL
-                } else {
-                    // Тикеты уходят в основной CHANNEL
+                }
+                // 📦 Отгрузки → SHIPMENT_CHANNEL
+                else if (item.type.startsWith('shipment_')) {
+                    await sendShipmentPost(item.type, item.payload);
+                }
+                // 📋 Обычные тикеты → CHANNEL
+                else {
                     const payload = item.payload || {};
-
                     if (!payload.subject && !payload.description && !payload.username) {
                         console.warn('⚠️ Пустой payload в outbox:', item.ticket_id, JSON.stringify(payload));
                         continue;
                     }
-
                     console.log(`📤 Тикет ${item.ticket_id}: user="${payload.username || 'UNDEFINED'}", subject="${(payload.subject || '').substring(0, 40)}"`);
-
                     const text = buildText(payload);
                     const existingId = await getMessageId(item.ticket_id);
                     if (existingId) {
-                        // Если пост удалён вручную — чиним привязку и постим заново
                         const editResult = await bot.editMessageText(text, {
                             chat_id: CHANNEL,
                             message_id: existingId,
                             parse_mode: 'Markdown',
                             reply_markup: keyboard(item.ticket_id)
                         }).catch((e) => (e.message && e.message.includes('not found')) ? 'STALE' : null);
-
                         if (editResult === 'STALE') {
                             await pool.query('DELETE FROM tg_messages WHERE ticket_id = $1', [item.ticket_id]);
                             const msg = await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown', reply_markup: keyboard(item.ticket_id) });
@@ -252,7 +336,6 @@ async function syncOutbox() {
                 }
             } catch (e) {
                 if (e.message && e.message.includes('429')) {
-                    // Попали в лимит Telegram — возвращаем событие в очередь на повтор
                     console.warn('⚠️ 429 при отправке, событие возвращено в очередь:', item.id);
                     await pool.query(
                         'INSERT INTO tg_outbox (type, ticket_id, payload) VALUES ($1, $2, $3)',
@@ -279,28 +362,18 @@ async function listToChat(chatId, filterKey) {
     const filter = FILTERS[filterKey] || FILTERS.active;
     const { rows } = await pool.query('SELECT ticket_id, payload FROM tg_tickets_cache ORDER BY updated_at DESC');
     const items = rows.filter(r => filter.test(r.payload)).slice(0, 12);
-
     if (items.length === 0) {
         return bot.sendMessage(chatId, `😌 ${filter.label}: ничего не найдено`);
     }
-
     const inlineKeyboard = items.map(r => {
         const p = r.payload;
-        const dl = p.deadline
-            ? ` · ⏰${daysLeft(p.deadline) < 0 ? '🔴' : ''}${new Date(p.deadline).toLocaleDateString('ru-RU')}`
-            : '';
+        const dl = p.deadline ? ` · ⏰${daysLeft(p.deadline) < 0 ? '🔴' : ''}${new Date(p.deadline).toLocaleDateString('ru-RU')}` : '';
         const statusIcon = STATUS[p.status]?.split(' ')[0] || '📝';
         const subject = trunc(p.subject || '(без темы)', 32);
-
-        // Telegram ограничивает callback_data 64 байтами
         const ticketId = String(r.ticket_id);
-        const safeCallbackData = `ticket:${ticketId}`.length > 64
-            ? `ticket:${ticketId.substring(0, 56)}`
-            : `ticket:${ticketId}`;
-
+        const safeCallbackData = `ticket:${ticketId}`.length > 64 ? `ticket:${ticketId.substring(0, 56)}` : `ticket:${ticketId}`;
         return [{ text: `${statusIcon} ${subject}${dl}`, callback_data: safeCallbackData }];
     });
-
     await bot.sendMessage(chatId, `${filter.label} — ${items.length} шт. Нажми на тикет:`, {
         reply_markup: { inline_keyboard: inlineKeyboard }
     });
@@ -314,7 +387,6 @@ async function buildSummaryText() {
     const today = active.filter(r => r.payload.deadline && daysLeft(r.payload.deadline) === 0);
     const soon = active.filter(r => r.payload.deadline && daysLeft(r.payload.deadline) > 0 && daysLeft(r.payload.deadline) <= 3);
     const noAssign = active.filter(r => !r.payload.assignee);
-
     const dateRu = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
     let s = `☀️ *СВОДКА* — ${dateRu}\n\n`;
     s += `📊 Активных: *${active.length}* (🔴 ${opened.length} открыто / 🟡 ${active.length - opened.length} в работе)\n`;
@@ -331,33 +403,27 @@ async function sendSummaryNow(chatId) {
     });
 }
 
-// ---------- 🚨 УМНЫЕ НАПОМИНАНИЯ (ТОЛЬКО В 09:00 МСК) ----------
+// ---------- 🚨 УМНЫЕ НАПОМИНАНИЯ ----------
 async function checkStale() {
     try {
         const now = moscowNow();
         if (now.hour !== 9) return;
-
         const kind = `stale_daily_${now.date}`;
         const { rows: logged } = await pool.query('SELECT 1 FROM tg_reminder_log WHERE ticket_id = $1 AND kind = $2', ['__system__', kind]);
         if (logged.length) return;
-
         const { rows } = await pool.query('SELECT ticket_id, payload FROM tg_tickets_cache');
         const problematic = [];
-
         for (const r of rows) {
             const p = r.payload;
             if (p.status !== 'open' && p.status !== 'in_progress') continue;
-
             const daysToDeadline = p.deadline ? daysLeft(p.deadline) : null;
             const ageDays = Math.floor((Date.now() - new Date(p.createdAt)) / DAY);
-
             if (daysToDeadline !== null && daysToDeadline >= 0 && daysToDeadline <= 3) {
                 problematic.push(`⏳ *Подходит срок* (осталось ${daysToDeadline} дн.)\n🎫 «${esc(p.subject)}» (👷 ${esc(p.assignee) || 'не назначен'})`);
             } else if (!p.assignee && !p.deadline && ageDays >= 3) {
                 problematic.push(`⚠️ *Требует внимания* (нет ответственного и срока, висит ${ageDays} дн.)\n🎫 «${esc(p.subject)}» от ${esc(p.username)}`);
             }
         }
-
         if (problematic.length > 0) {
             const text = `🚨 *ОТЧЁТ: ПРОБЛЕМНЫЕ ТИКЕТЫ*\n\n${problematic.slice(0, 15).join('\n\n')}${problematic.length > 15 ? `\n\n_...и ещё ${problematic.length - 15} тикетов_` : ''}`;
             await bot.sendMessage(CHANNEL, text, { parse_mode: 'Markdown' });
@@ -388,6 +454,22 @@ const replyWait = new Map();
 bot.on('callback_query', async (q) => {
     const d = q.data;
     try {
+        // 🆕 КНОПКИ ЗАЯВОК НА ИНСТРУМЕНТ
+        if (d.startsWith('toolreq_approve:') || d.startsWith('toolreq_reject:')) {
+            const [action, id] = d.split(':');
+            const act = action === 'toolreq_approve' ? 'tool_request_approve' : 'tool_request_reject';
+            const author = [q.from.first_name, q.from.last_name].filter(Boolean).join(' ') || 'Telegram';
+            await pool.query(
+                'INSERT INTO tg_commands (action, ticket_id, value, author) VALUES ($1, $2, $3, $4)',
+                [act, id, '', author]
+            );
+            return bot.answerCallbackQuery(q.id, {
+                text: action === 'toolreq_approve'
+                    ? '✅ Команда одобрения поставлена в очередь'
+                    : '❌ Отклонение записано'
+            });
+        }
+
         if (d.startsWith('status:')) {
             const [, id, status] = d.split(':');
             await pool.query('INSERT INTO tg_commands (action, ticket_id, value) VALUES ($1, $2, $3)', ['status', id, status]);
@@ -467,7 +549,6 @@ bot.on('message', async (msg) => {
     if (t === '👷 Без ответственного') return listToChat(msg.chat.id, 'noassign');
     if (t === '☀️ Сводка') return sendSummaryNow(msg.chat.id);
     if (t === '/cancel') { replyWait.delete(msg.from.id); return bot.sendMessage(msg.from.id, 'Отменено'); }
-
     const ticketId = replyWait.get(msg.from.id);
     if (!ticketId) return;
     replyWait.delete(msg.from.id);
@@ -493,4 +574,5 @@ bot.on('message', async (msg) => {
     console.log('🤖 Бот запущен');
     console.log(`📋 Канал тикетов: ${CHANNEL}`);
     console.log(`📦 Канал отгрузок: ${SHIPMENT_CHANNEL}`);
+    console.log(`🛠️ Канал заявок на инструмент: ${TOOL_CHANNEL}`);
 })();
