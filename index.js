@@ -21,7 +21,12 @@ const SHIPMENT_CHANNEL = process.env.SHIPMENT_CHANNEL_ID || CHANNEL;
 const TOOL_CHANNEL = process.env.TOOL_CHANNEL_ID || CHANNEL;
 
 const SUMMARY_HOUR = parseInt(process.env.SUMMARY_HOUR || '8', 10);
-const INITIAL_ADMIN_ID = process.env.INITIAL_ADMIN_ID; // 🆕 ID первого админа
+const INITIAL_ADMIN_ID = process.env.INITIAL_ADMIN_ID;
+
+// 🆕 Читаем список менеджеров статусов из .env
+const statusManagers = process.env.STATUS_MANAGERS 
+    ? process.env.STATUS_MANAGERS.split(',').map(id => parseInt(id.trim(), 10)) 
+    : [];
 
 const CAT = { equipment: '🔧 Оборудование', facility: '🏢 Помещения', tools: '🔨 Инструмент', other: '📝 Другое' };
 const STATUS = { open: '🔴 Открыт', in_progress: '🟡 В работе', resolved: '🟢 Решено', closed: '⚪ Закрыт' };
@@ -35,7 +40,6 @@ let pool;
 
 // 🆕 ========== СИСТЕМА АДМИНИСТРАТОРОВ ==========
 
-// Создать таблицу админов
 async function initAdminsTable() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS tg_admins (
@@ -45,7 +49,6 @@ async function initAdminsTable() {
         );
     `);
     
-    // 🆕 Добавить первичного админа, если он задан и ещё не существует
     if (INITIAL_ADMIN_ID) {
         const { rows } = await pool.query(
             'SELECT 1 FROM tg_admins WHERE user_id = $1',
@@ -61,7 +64,6 @@ async function initAdminsTable() {
     }
 }
 
-// Проверка: является ли пользователь админом
 async function isAdmin(userId) {
     if (!userId) return false;
     const { rows } = await pool.query(
@@ -71,7 +73,13 @@ async function isAdmin(userId) {
     return rows.length > 0;
 }
 
-// Добавить админа
+// 🆕 Функция проверки: может ли пользователь менять статус
+async function canChangeStatus(userId) {
+    // Если пользователь админ (из нашей таблицы) ИЛИ его ID есть в списке STATUS_MANAGERS
+    const isAdminUser = await isAdmin(userId);
+    return isAdminUser || statusManagers.includes(userId);
+}
+
 async function addAdmin(userId, username) {
     await pool.query(
         'INSERT INTO tg_admins (user_id, username) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username',
@@ -79,18 +87,15 @@ async function addAdmin(userId, username) {
     );
 }
 
-// Удалить админа
 async function removeAdmin(userId) {
     await pool.query('DELETE FROM tg_admins WHERE user_id = $1', [userId]);
 }
 
-// Получить список всех админов
 async function getAdmins() {
     const { rows } = await pool.query('SELECT user_id, username, added_at FROM tg_admins ORDER BY added_at');
     return rows;
 }
 
-// Получить имя пользователя из Telegram
 async function getUserFullName(userId) {
     try {
         const member = await bot.getChatMember(CHANNEL, userId);
@@ -117,9 +122,9 @@ function buildText(p) {
         : '—';
     const subject = (p.subject && String(p.subject).trim()) || '(тема не указана)';
     const description = (p.description && String(p.description).trim()) || '(описание не указано)';
-    const category = CAT[p.category] || p.category || '📝 Другое';
+    const category = CAT[p.category] || p.category || ' Другое';
     const status = STATUS[p.status] || p.status || '🔴 Открыт';
-    let s = `🆕 *ОБРАЩЕНИЕ*\n\n👤 *${esc(username)}*\n${category}\n\n*Тема:* ${esc(subject)}\n${esc(trunc(description, 300))}\n\n📅 ${d}\n${status}`;
+    let s = ` *ОБРАЩЕНИЕ*\n\n *${esc(username)}*\n${category}\n\n*Тема:* ${esc(subject)}\n${esc(trunc(description, 300))}\n\n📅 ${d}\n${status}`;
     if (p.assignee) s += ` · 👷 ${esc(p.assignee)}`;
     if (p.deadline) s += ` · ⏰ до ${new Date(p.deadline).toLocaleDateString('ru-RU')}`;
     if (p.responsesCount) s += `\n\n💬 _Ответов: ${p.responsesCount}_\nПоследний (${esc(p.lastResponse?.author || '?')}): ${esc(trunc(p.lastResponse?.text || '', 120))}`;
@@ -137,7 +142,7 @@ const keyboard = (id) => ({
 
 const mainKeyboard = {
     keyboard: [
-        [{ text: '📋 Обращения' }, { text: '🔴 Просроченные' }],
+        [{ text: ' Обращения' }, { text: ' Просроченные' }],
         [{ text: '👷 Без ответственного' }, { text: '☀️ Сводка' }],
         [{ text: '❓ Справка' }],
     ],
@@ -162,7 +167,7 @@ async function initDb() {
     await pool.query(`CREATE TABLE IF NOT EXISTS tg_messages (ticket_id VARCHAR(64) PRIMARY KEY, message_id BIGINT NOT NULL);`);
     await pool.query(`CREATE TABLE IF NOT EXISTS tg_tickets_cache (ticket_id VARCHAR(64) PRIMARY KEY, payload JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW());`);
     await pool.query(`CREATE TABLE IF NOT EXISTS tg_reminder_log (ticket_id VARCHAR(64), kind VARCHAR(24), PRIMARY KEY (ticket_id, kind));`);
-    await initAdminsTable(); // 🆕 Инициализация таблицы админов
+    await initAdminsTable();
 }
 
 async function getMessageId(ticketId) {
@@ -183,7 +188,7 @@ function buildShipmentText(type, p) {
     if (type.endsWith('_batch') && p.items) {
         const isShipped = type.includes('shipped');
         const isUpdated = type.includes('updated');
-        const HEADER = isShipped ? '✅ *ОТГРУЖЕНО*' : (isUpdated ? '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*' : '📦 *НОВАЯ ОТГРУЗКА*');
+        const HEADER = isShipped ? '✅ *ОТГРУЖЕНО*' : (isUpdated ? '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*' : ' *НОВАЯ ОТГРУЗКА*');
         const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
         let s = `${HEADER}\n\n`;
         if (p.customer) s += `🏢 *Заказчик:* ${esc(p.customer)}\n`;
@@ -202,7 +207,7 @@ function buildShipmentText(type, p) {
     }
     const HEADER = { shipment_shipped: '✅ *ОТГРУЖЕНО*', shipment_updated: '📊 *ОБНОВЛЕНИЕ*', shipment_deleted: '🗑 *УДАЛЕНА*' }[type] || '📦 *ОТГРУЗКА*';
     const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
-    return `${HEADER}\n\n🏢 *Заказчик:* ${esc(p.customer)}\n📅 *Дата:* ${date}\n📦 *Состав:* ${esc(p.itemName || p.name || 'Без названия')}\nПлан: *${p.quantity ?? '—'} шт* / Факт: *${p.fact ?? '—'} шт*`;
+    return `${HEADER}\n\n *Заказчик:* ${esc(p.customer)}\n📅 *Дата:* ${date}\n📦 *Состав:* ${esc(p.itemName || p.name || 'Без названия')}\nПлан: *${p.quantity ?? '—'} шт* / Факт: *${p.fact ?? '—'} шт*`;
 }
 
 async function sendShipmentPost(type, payload) {
@@ -223,7 +228,7 @@ async function sendShipmentPost(type, payload) {
 }
 
 // ---------- 🛠️ ЗАЯВКИ НА ИНСТРУМЕНТ ОТ СОТРУДНИКОВ ----------
-const TOOLREQ_REASON = { wear: '📉 Износ', broken: '💥 Поломка', new_op: '🆕 Новая операция', other: '📝 Другое' };
+const TOOLREQ_REASON = { wear: '📉 Износ', broken: '💥 Поломка', new_op: '🆕 Новая операция', other: ' Другое' };
 const TOOLREQ_STATUS = {
     pending: '🟡 Ожидает одобрения',
     approved: '✅ Одобрена',
@@ -241,14 +246,14 @@ function buildToolRequestText(p) {
     ).join('\n');
     let s = `🛠️ *ЗАЯВКА НА ИНСТРУМЕНТ*\n\n`;
     s += `👤 *${esc(p.employeeName || 'Сотрудник')}*\n`;
-    s += `🏭 Оборудование: ${esc(p.equipmentName || '?')}\n`;
+    s += ` Оборудование: ${esc(p.equipmentName || '?')}\n`;
     if (p.productName) s += `⚙️ Деталь: ${esc(p.productName)}\n`;
     s += `📅 ${d}\n\n*Состав:*\n${items || '_пусто_'}\n\n`;
-    s += `📝 Причина: ${TOOLREQ_REASON[p.reason] || esc(p.reason || '—')}`;
-    if (p.comment) s += `\n💬 ${esc(trunc(p.comment, 200))}`;
+    s += ` Причина: ${TOOLREQ_REASON[p.reason] || esc(p.reason || '—')}`;
+    if (p.comment) s += `\n ${esc(trunc(p.comment, 200))}`;
     s += `\n\n${TOOLREQ_STATUS[p.status] || p.status || '—'}`;
     if (p.approvedBy) s += ` · 👤 ${esc(p.approvedBy)}`;
-    if (p.rejectComment) s += `\n⚠️ _${esc(trunc(p.rejectComment, 200))}_`;
+    if (p.rejectComment) s += `\n️ _${esc(trunc(p.rejectComment, 200))}_`;
     return s;
 }
 
@@ -370,7 +375,7 @@ async function syncOutbox() {
                         `${i + 1}. ${it.toolName} — ${it.orderQuantity || it.quantity} шт`
                     ).join('\n');
 
-                    const text = `🌐 *НОВАЯ ЗАЯВКА ИЗ ВЕБ-ВЕРСИИ*\n\n` +
+                    const text = ` *НОВАЯ ЗАЯВКА ИЗ ВЕБ-ВЕРСИИ*\n\n` +
                                  `👤 *Инициатор:* ${p.createdBy || 'Технолог'}\n` +
                                  `📦 *Позиций:* ${p.items?.length || 0}\n` +
                                  `🔢 *Всего штук:* ${p.totalOrderQty || 0}\n` +
@@ -438,10 +443,10 @@ async function syncOutbox() {
 
 // ---------- СПИСКИ И СВОДКА ----------
 const FILTERS = {
-    active: { label: '🔥 Активные', test: p => p.status === 'open' || p.status === 'in_progress' },
-    overdue: { label: '🔴 Просроченные', test: p => (p.status === 'open' || p.status === 'in_progress') && p.deadline && daysLeft(p.deadline) < 0 },
+    active: { label: ' Активные', test: p => p.status === 'open' || p.status === 'in_progress' },
+    overdue: { label: ' Просроченные', test: p => (p.status === 'open' || p.status === 'in_progress') && p.deadline && daysLeft(p.deadline) < 0 },
     noassign: { label: '👷 Без ответственного', test: p => (p.status === 'open' || p.status === 'in_progress') && !p.assignee },
-    all: { label: '📦 Все обращения', test: () => true },
+    all: { label: ' Все обращения', test: () => true },
 };
 
 async function listToChat(chatId, filterKey) {
@@ -474,11 +479,11 @@ async function buildSummaryText() {
     const soon = active.filter(r => r.payload.deadline && daysLeft(r.payload.deadline) > 0 && daysLeft(r.payload.deadline) <= 3);
     const noAssign = active.filter(r => !r.payload.assignee);
     const dateRu = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
-    let s = `☀️ *СВОДКА* — ${dateRu}\n\n`;
+    let s = `️ *СВОДКА* — ${dateRu}\n\n`;
     s += `📊 Активных: *${active.length}* (🔴 ${opened.length} открыто / 🟡 ${active.length - opened.length} в работе)\n`;
-    s += `🔴 Просрочено: *${overdue.length}* · ⏰ Срок сегодня: *${today.length}* · 🟠 Ближайшие 3 дня: *${soon.length}*\n`;
+    s += ` Просрочено: *${overdue.length}* · ⏰ Срок сегодня: *${today.length}* · 🟠 Ближайшие 3 дня: *${soon.length}*\n`;
     s += `👷 Без ответственного: *${noAssign.length}*\n`;
-    if (active.length === 0) s += `\n😌 Все обращения закрыты. Отличная работа!`;
+    if (active.length === 0) s += `\n Все обращения закрыты. Отличная работа!`;
     return s;
 }
 
@@ -505,7 +510,7 @@ async function checkStale() {
             const daysToDeadline = p.deadline ? daysLeft(p.deadline) : null;
             const ageDays = Math.floor((Date.now() - new Date(p.createdAt)) / DAY);
             if (daysToDeadline !== null && daysToDeadline >= 0 && daysToDeadline <= 3) {
-                problematic.push(`⏳ *Подходит срок* (осталось ${daysToDeadline} дн.)\n🎫 «${esc(p.subject)}» (👷 ${esc(p.assignee) || 'не назначен'})`);
+                problematic.push(`⏳ *Подходит срок* (осталось ${daysToDeadline} дн.)\n «${esc(p.subject)}» (👷 ${esc(p.assignee) || 'не назначен'})`);
             } else if (!p.assignee && !p.deadline && ageDays >= 3) {
                 problematic.push(`⚠️ *Требует внимания* (нет ответственного и срока, висит ${ageDays} дн.)\n🎫 «${esc(p.subject)}» от ${esc(p.username)}`);
             }
@@ -542,7 +547,6 @@ bot.onText(/\/admin_add/, async (msg) => {
         return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для выполнения этой команды.');
     }
     
-    // Формат: /admin_add 123456789 Иванов И.И.
     const parts = msg.text.split(' ');
     if (parts.length < 2) {
         return bot.sendMessage(msg.chat.id, '📝 Использование: `/admin_add <user_id> [имя]`', { parse_mode: 'Markdown' });
@@ -572,11 +576,11 @@ bot.onText(/\/admin_remove/, async (msg) => {
     
     const removeId = parseInt(parts[1], 10);
     if (isNaN(removeId)) {
-        return bot.sendMessage(msg.chat.id, '❌ Неверный формат ID.');
+        return bot.sendMessage(msg.chat.id, ' Неверный формат ID.');
     }
     
     if (removeId === userId) {
-        return bot.sendMessage(msg.chat.id, '⚠️ Вы не можете удалить сами себя из списка администраторов.');
+        return bot.sendMessage(msg.chat.id, '️ Вы не можете удалить сами себя из списка администраторов.');
     }
     
     await removeAdmin(removeId);
@@ -594,7 +598,7 @@ bot.onText(/\/admins/, async (msg) => {
         return bot.sendMessage(msg.chat.id, '📋 Список администраторов пуст.');
     }
     
-    let text = '👥 *Список администраторов:*\n\n';
+    let text = ' *Список администраторов:*\n\n';
     admins.forEach((a, i) => {
         text += `${i + 1}. *${esc(a.username)}* (ID: \`${a.user_id}\`)\n   Добавлен: ${new Date(a.added_at).toLocaleDateString('ru-RU')}\n`;
     });
@@ -610,7 +614,7 @@ bot.on('callback_query', async (q) => {
     const userId = q.from.id;
     
     try {
-        // 🆕 КНОПКИ ЗАЯВОК НА ИНСТРУМЕНТ (без проверки админа — там своя логика)
+        // 🆕 КНОПКИ ЗАЯВОК НА ИНСТРУМЕНТ (без проверки)
         if (d.startsWith('toolreq_approve:') || d.startsWith('toolreq_reject:')) {
             const [action, id] = d.split(':');
             const act = action === 'toolreq_approve' ? 'tool_request_approve' : 'tool_request_reject';
@@ -626,13 +630,14 @@ bot.on('callback_query', async (q) => {
             });
         }
 
-        // 🆕 ПРОВЕРКА АДМИНА ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ С ТИКЕТАМИ
+        // 🆕 ПРОВЕРКА ПРАВ ДЛЯ УПРАВЛЕНИЯ ТИКЕТАМИ (Статус, Исполнитель, Срок)
+        // Кнопка "Ответить" (reply) НЕ проверяется - она разрешена всем
         if (d.startsWith('status:') || d.startsWith('amenu:') || d.startsWith('assign:') || 
-            d.startsWith('dlmenu:') || d.startsWith('dl:') || d.startsWith('reply:')) {
+            d.startsWith('dlmenu:') || d.startsWith('dl:')) {
             
-            if (!(await isAdmin(userId))) {
+            if (!(await canChangeStatus(userId))) {
                 return bot.answerCallbackQuery(q.id, { 
-                    text: '⛔ У вас нет прав для управления тикетами',
+                    text: '⛔ У вас нет прав менять статус, сроки или назначать исполнителя. Вы можете только писать ответы.',
                     show_alert: true 
                 });
             }
@@ -712,7 +717,7 @@ bot.onText(/\/summary/, (msg) => sendSummaryNow(msg.chat.id));
 bot.on('message', async (msg) => {
     if (!msg.text) return;
     const t = msg.text.trim();
-    if (t === '📋 Обращения') return listToChat(msg.chat.id, 'active');
+    if (t === ' Обращения') return listToChat(msg.chat.id, 'active');
     if (t === '🔴 Просроченные') return listToChat(msg.chat.id, 'overdue');
     if (t === '👷 Без ответственного') return listToChat(msg.chat.id, 'noassign');
     if (t === '☀️ Сводка') return sendSummaryNow(msg.chat.id);
@@ -747,4 +752,5 @@ bot.on('message', async (msg) => {
     console.log(`📦 Канал отгрузок: ${SHIPMENT_CHANNEL}`);
     console.log(`🛠️ Канал заявок на инструмент: ${TOOL_CHANNEL}`);
     console.log(`👑 Первичный админ: ${INITIAL_ADMIN_ID || 'не задан'}`);
+    console.log(`🔧 Менеджеры статусов: ${statusManagers.join(', ') || 'не заданы'}`);
 })();
