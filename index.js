@@ -122,7 +122,7 @@ const keyboard = (id) => ({
         [{ text: '🟡 В работу', callback_data: `status:${id}:in_progress` }, { text: '🟢 Решено', callback_data: `status:${id}:resolved` }],
         [{ text: '🔴 Открыть', callback_data: `status:${id}:open` }, { text: '⚪ Закрыть', callback_data: `status:${id}:closed` }],
         [{ text: '👷 Назначить ▾', callback_data: `amenu:${id}` }, { text: '💬 Ответить', callback_data: `reply:${id}` }],
-        [{ text: '⏰ Срок ', callback_data: `dlmenu:${id}` }],
+        [{ text: '⏰ Срок ▾', callback_data: `dlmenu:${id}` }],
     ]
 });
 
@@ -311,12 +311,13 @@ async function sendToolRequestPost(item) {
 }
 
 // ---------- 🆕 УНИВЕРСАЛЬНАЯ ОТПРАВКА ТЕКСТА В КАНАЛ ----------
-async function sendTextToChannel(channelId, text) {
+async function sendTextToChannel(channelId, text, contextName = '') {
     try {
         await bot.sendMessage(channelId, text, { parse_mode: 'Markdown' });
+        if (contextName) console.log(`✅ ${contextName} отправлен`);
         return true;
     } catch (e) {
-        console.error(`Ошибка отправки в ${channelId}:`, e.message);
+        console.error(`Ошибка отправки ${contextName}:`, e.message);
         if (e.message && e.message.includes('400')) {
             await bot.sendMessage(channelId, text.replace(/[*_\\]/g, '')).catch(() => {});
             return true;
@@ -352,22 +353,27 @@ async function syncOutbox() {
                 // 🆕 ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ПО ТИКЕТАМ → канал обращений
                 if (item.type === 'weekly_report_tickets') {
                     console.log('📊 Отправка еженедельного отчёта по тикетам...');
-                    await sendTextToChannel(CHANNEL, item.payload?.text || '❌ Отчёт недоступен');
+                    await sendTextToChannel(CHANNEL, item.payload?.text || '❌ Отчёт недоступен', 'Отчёт по тикетам');
                 }
                 // 🆕 ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ПО ИНСТРУМЕНТУ → канал заявок
                 else if (item.type === 'weekly_report_tools') {
                     console.log('🛠️ Отправка еженедельного отчёта по инструменту...');
-                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || '❌ Отчёт недоступен');
+                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || '❌ Отчёт недоступен', 'Отчёт по инструменту');
                 }
                 // 🆕 ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ПО ОТГРУЗКАМ → канал отгрузок
                 else if (item.type === 'weekly_report_shipments') {
                     console.log('📦 Отправка еженедельного отчёта по отгрузкам...');
-                    await sendTextToChannel(SHIPMENT_CHANNEL, item.payload?.text || '❌ Отчёт недоступен');
+                    await sendTextToChannel(SHIPMENT_CHANNEL, item.payload?.text || '❌ Отчёт недоступен', 'Отчёт по отгрузкам');
                 }
                 // 🆕 ПРОГНОЗ РАСХОДА ИНСТРУМЕНТА → канал заявок
                 else if (item.type === 'tool_forecast') {
                     console.log('🔮 Отправка прогноза расхода инструмента...');
-                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || 'Прогноз недоступен');
+                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || 'Прогноз недоступен', 'Прогноз инструмента');
+                }
+                // 🆕 НАПОМИНАНИЕ О ЗАЯВКАХ ОТ СОТРУДНИКОВ → канал заявок
+                else if (item.type === 'tool_reminder') {
+                    console.log('⏰ Отправка напоминания о заявках на инструмент...');
+                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || 'Напоминание недоступно', 'Напоминание о заявках');
                 }
                 else if (item.type === 'employee_tool_request' || item.type === 'employee_tool_request_updated') {
                     await sendToolRequestPost(item);
@@ -404,7 +410,7 @@ async function syncOutbox() {
                                  `*Состав:*\n${itemsList}\n\n` +
                                  `_✅ Заявка уже создана и передана на склад._`;
 
-                    await sendTextToChannel(TOOL_CHANNEL, text);
+                    await sendTextToChannel(TOOL_CHANNEL, text, 'Заявка из веб-версии');
                 }
                 else {
                     const payload = item.payload || {};
