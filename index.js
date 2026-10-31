@@ -23,9 +23,8 @@ const TOOL_CHANNEL = process.env.TOOL_CHANNEL_ID || CHANNEL;
 const SUMMARY_HOUR = parseInt(process.env.SUMMARY_HOUR || '8', 10);
 const INITIAL_ADMIN_ID = process.env.INITIAL_ADMIN_ID;
 
-// 🆕 Читаем список менеджеров статусов из .env
-const statusManagers = process.env.STATUS_MANAGERS 
-    ? process.env.STATUS_MANAGERS.split(',').map(id => parseInt(id.trim(), 10)) 
+const statusManagers = process.env.STATUS_MANAGERS
+    ? process.env.STATUS_MANAGERS.split(',').map(id => parseInt(id.trim(), 10))
     : [];
 
 const CAT = { equipment: '🔧 Оборудование', facility: '🏢 Помещения', tools: '🔨 Инструмент', other: '📝 Другое' };
@@ -38,8 +37,7 @@ const DAY = 24 * 60 * 60 * 1000;
 
 let pool;
 
-// 🆕 ========== СИСТЕМА АДМИНИСТРАТОРОВ ==========
-
+// ========== СИСТЕМА АДМИНИСТРАТОРОВ ==========
 async function initAdminsTable() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS tg_admins (
@@ -48,7 +46,7 @@ async function initAdminsTable() {
             added_at TIMESTAMPTZ DEFAULT NOW()
         );
     `);
-    
+
     if (INITIAL_ADMIN_ID) {
         const { rows } = await pool.query(
             'SELECT 1 FROM tg_admins WHERE user_id = $1',
@@ -73,9 +71,7 @@ async function isAdmin(userId) {
     return rows.length > 0;
 }
 
-// 🆕 Функция проверки: может ли пользователь менять статус
 async function canChangeStatus(userId) {
-    // Если пользователь админ (из нашей таблицы) ИЛИ его ID есть в списке STATUS_MANAGERS
     const isAdminUser = await isAdmin(userId);
     return isAdminUser || statusManagers.includes(userId);
 }
@@ -95,17 +91,7 @@ async function getAdmins() {
     const { rows } = await pool.query('SELECT user_id, username, added_at FROM tg_admins ORDER BY added_at');
     return rows;
 }
-
-async function getUserFullName(userId) {
-    try {
-        const member = await bot.getChatMember(CHANNEL, userId);
-        const user = member.user;
-        return [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || `ID:${user.id}`;
-    } catch (e) {
-        return `ID:${userId}`;
-    }
-}
-// 🆕 ========== КОНЕЦ СИСТЕМЫ АДМИНИСТРАТОРОВ ==========
+// ========== КОНЕЦ СИСТЕМЫ АДМИНИСТРАТОРОВ ==========
 
 // ---------- ФОРМИРОВАНИЕ ТЕКСТА ТИКЕТА ----------
 function buildText(p) {
@@ -122,9 +108,9 @@ function buildText(p) {
         : '—';
     const subject = (p.subject && String(p.subject).trim()) || '(тема не указана)';
     const description = (p.description && String(p.description).trim()) || '(описание не указано)';
-    const category = CAT[p.category] || p.category || ' Другое';
+    const category = CAT[p.category] || p.category || '📝 Другое';
     const status = STATUS[p.status] || p.status || '🔴 Открыт';
-    let s = ` *ОБРАЩЕНИЕ*\n\n *${esc(username)}*\n${category}\n\n*Тема:* ${esc(subject)}\n${esc(trunc(description, 300))}\n\n📅 ${d}\n${status}`;
+    let s = `🆕 *ОБРАЩЕНИЕ*\n\n👤 *${esc(username)}*\n${category}\n\n*Тема:* ${esc(subject)}\n${esc(trunc(description, 300))}\n\n📅 ${d}\n${status}`;
     if (p.assignee) s += ` · 👷 ${esc(p.assignee)}`;
     if (p.deadline) s += ` · ⏰ до ${new Date(p.deadline).toLocaleDateString('ru-RU')}`;
     if (p.responsesCount) s += `\n\n💬 _Ответов: ${p.responsesCount}_\nПоследний (${esc(p.lastResponse?.author || '?')}): ${esc(trunc(p.lastResponse?.text || '', 120))}`;
@@ -136,13 +122,13 @@ const keyboard = (id) => ({
         [{ text: '🟡 В работу', callback_data: `status:${id}:in_progress` }, { text: '🟢 Решено', callback_data: `status:${id}:resolved` }],
         [{ text: '🔴 Открыть', callback_data: `status:${id}:open` }, { text: '⚪ Закрыть', callback_data: `status:${id}:closed` }],
         [{ text: '👷 Назначить ▾', callback_data: `amenu:${id}` }, { text: '💬 Ответить', callback_data: `reply:${id}` }],
-        [{ text: '⏰ Срок ▾', callback_data: `dlmenu:${id}` }],
+        [{ text: '⏰ Срок ', callback_data: `dlmenu:${id}` }],
     ]
 });
 
 const mainKeyboard = {
     keyboard: [
-        [{ text: ' Обращения' }, { text: ' Просроченные' }],
+        [{ text: '📋 Обращения' }, { text: '🔴 Просроченные' }],
         [{ text: '👷 Без ответственного' }, { text: '☀️ Сводка' }],
         [{ text: '❓ Справка' }],
     ],
@@ -188,7 +174,7 @@ function buildShipmentText(type, p) {
     if (type.endsWith('_batch') && p.items) {
         const isShipped = type.includes('shipped');
         const isUpdated = type.includes('updated');
-        const HEADER = isShipped ? '✅ *ОТГРУЖЕНО*' : (isUpdated ? '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*' : ' *НОВАЯ ОТГРУЗКА*');
+        const HEADER = isShipped ? '✅ *ОТГРУЖЕНО*' : (isUpdated ? '📊 *ОБНОВЛЕНИЕ ОТГРУЗКИ*' : '📦 *НОВАЯ ОТГРУЗКА*');
         const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
         let s = `${HEADER}\n\n`;
         if (p.customer) s += `🏢 *Заказчик:* ${esc(p.customer)}\n`;
@@ -207,7 +193,7 @@ function buildShipmentText(type, p) {
     }
     const HEADER = { shipment_shipped: '✅ *ОТГРУЖЕНО*', shipment_updated: '📊 *ОБНОВЛЕНИЕ*', shipment_deleted: '🗑 *УДАЛЕНА*' }[type] || '📦 *ОТГРУЗКА*';
     const date = p.shipmentDate ? new Date(p.shipmentDate).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' }) : '—';
-    return `${HEADER}\n\n *Заказчик:* ${esc(p.customer)}\n📅 *Дата:* ${date}\n📦 *Состав:* ${esc(p.itemName || p.name || 'Без названия')}\nПлан: *${p.quantity ?? '—'} шт* / Факт: *${p.fact ?? '—'} шт*`;
+    return `${HEADER}\n\n🏢 *Заказчик:* ${esc(p.customer)}\n📅 *Дата:* ${date}\n📦 *Состав:* ${esc(p.itemName || p.name || 'Без названия')}\nПлан: *${p.quantity ?? '—'} шт* / Факт: *${p.fact ?? '—'} шт*`;
 }
 
 async function sendShipmentPost(type, payload) {
@@ -228,7 +214,7 @@ async function sendShipmentPost(type, payload) {
 }
 
 // ---------- 🛠️ ЗАЯВКИ НА ИНСТРУМЕНТ ОТ СОТРУДНИКОВ ----------
-const TOOLREQ_REASON = { wear: '📉 Износ', broken: '💥 Поломка', new_op: '🆕 Новая операция', other: ' Другое' };
+const TOOLREQ_REASON = { wear: '📉 Износ', broken: '💥 Поломка', new_op: '🆕 Новая операция', other: '📝 Другое' };
 const TOOLREQ_STATUS = {
     pending: '🟡 Ожидает одобрения',
     approved: '✅ Одобрена',
@@ -246,14 +232,14 @@ function buildToolRequestText(p) {
     ).join('\n');
     let s = `🛠️ *ЗАЯВКА НА ИНСТРУМЕНТ*\n\n`;
     s += `👤 *${esc(p.employeeName || 'Сотрудник')}*\n`;
-    s += ` Оборудование: ${esc(p.equipmentName || '?')}\n`;
+    s += `🏭 Оборудование: ${esc(p.equipmentName || '?')}\n`;
     if (p.productName) s += `⚙️ Деталь: ${esc(p.productName)}\n`;
     s += `📅 ${d}\n\n*Состав:*\n${items || '_пусто_'}\n\n`;
-    s += ` Причина: ${TOOLREQ_REASON[p.reason] || esc(p.reason || '—')}`;
-    if (p.comment) s += `\n ${esc(trunc(p.comment, 200))}`;
+    s += `📝 Причина: ${TOOLREQ_REASON[p.reason] || esc(p.reason || '—')}`;
+    if (p.comment) s += `\n💬 ${esc(trunc(p.comment, 200))}`;
     s += `\n\n${TOOLREQ_STATUS[p.status] || p.status || '—'}`;
     if (p.approvedBy) s += ` · 👤 ${esc(p.approvedBy)}`;
-    if (p.rejectComment) s += `\n️ _${esc(trunc(p.rejectComment, 200))}_`;
+    if (p.rejectComment) s += `\n⚠️ _${esc(trunc(p.rejectComment, 200))}_`;
     return s;
 }
 
@@ -324,6 +310,21 @@ async function sendToolRequestPost(item) {
     }
 }
 
+// ---------- 🆕 УНИВЕРСАЛЬНАЯ ОТПРАВКА ТЕКСТА В КАНАЛ ----------
+async function sendTextToChannel(channelId, text) {
+    try {
+        await bot.sendMessage(channelId, text, { parse_mode: 'Markdown' });
+        return true;
+    } catch (e) {
+        console.error(`Ошибка отправки в ${channelId}:`, e.message);
+        if (e.message && e.message.includes('400')) {
+            await bot.sendMessage(channelId, text.replace(/[*_\\]/g, '')).catch(() => {});
+            return true;
+        }
+        return false;
+    }
+}
+
 // ---------- СИНХРОНИЗАЦИЯ OUTBOX ----------
 let isSyncing = false;
 
@@ -348,7 +349,27 @@ async function syncOutbox() {
             if (i > 0) await new Promise(resolve => setTimeout(resolve, 1200));
 
             try {
-                if (item.type === 'employee_tool_request' || item.type === 'employee_tool_request_updated') {
+                // 🆕 ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ПО ТИКЕТАМ → канал обращений
+                if (item.type === 'weekly_report_tickets') {
+                    console.log('📊 Отправка еженедельного отчёта по тикетам...');
+                    await sendTextToChannel(CHANNEL, item.payload?.text || '❌ Отчёт недоступен');
+                }
+                // 🆕 ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ПО ИНСТРУМЕНТУ → канал заявок
+                else if (item.type === 'weekly_report_tools') {
+                    console.log('🛠️ Отправка еженедельного отчёта по инструменту...');
+                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || '❌ Отчёт недоступен');
+                }
+                // 🆕 ЕЖЕНЕДЕЛЬНЫЙ ОТЧЁТ ПО ОТГРУЗКАМ → канал отгрузок
+                else if (item.type === 'weekly_report_shipments') {
+                    console.log('📦 Отправка еженедельного отчёта по отгрузкам...');
+                    await sendTextToChannel(SHIPMENT_CHANNEL, item.payload?.text || '❌ Отчёт недоступен');
+                }
+                // 🆕 ПРОГНОЗ РАСХОДА ИНСТРУМЕНТА → канал заявок
+                else if (item.type === 'tool_forecast') {
+                    console.log('🔮 Отправка прогноза расхода инструмента...');
+                    await sendTextToChannel(TOOL_CHANNEL, item.payload?.text || 'Прогноз недоступен');
+                }
+                else if (item.type === 'employee_tool_request' || item.type === 'employee_tool_request_updated') {
                     await sendToolRequestPost(item);
                 }
                 else if (item.type === 'sync') {
@@ -371,11 +392,11 @@ async function syncOutbox() {
                 }
                 else if (item.type === 'web_tool_request') {
                     const p = item.payload || {};
-                    const itemsList = (p.items || []).map((it, i) => 
+                    const itemsList = (p.items || []).map((it, i) =>
                         `${i + 1}. ${it.toolName} — ${it.orderQuantity || it.quantity} шт`
                     ).join('\n');
 
-                    const text = ` *НОВАЯ ЗАЯВКА ИЗ ВЕБ-ВЕРСИИ*\n\n` +
+                    const text = `🌐 *НОВАЯ ЗАЯВКА ИЗ ВЕБ-ВЕРСИИ*\n\n` +
                                  `👤 *Инициатор:* ${p.createdBy || 'Технолог'}\n` +
                                  `📦 *Позиций:* ${p.items?.length || 0}\n` +
                                  `🔢 *Всего штук:* ${p.totalOrderQty || 0}\n` +
@@ -383,14 +404,7 @@ async function syncOutbox() {
                                  `*Состав:*\n${itemsList}\n\n` +
                                  `_✅ Заявка уже создана и передана на склад._`;
 
-                    try {
-                        await bot.sendMessage(TOOL_CHANNEL, text, { parse_mode: 'Markdown' });
-                    } catch (e) {
-                        console.error('Ошибка отправки web_tool_request:', e.message);
-                        if (e.message && e.message.includes('400')) {
-                            await bot.sendMessage(TOOL_CHANNEL, text.replace(/[*_\\]/g, '')).catch(() => {});
-                        }
-                    }
+                    await sendTextToChannel(TOOL_CHANNEL, text);
                 }
                 else {
                     const payload = item.payload || {};
@@ -432,10 +446,14 @@ async function syncOutbox() {
                         'INSERT INTO tg_outbox (type, ticket_id, payload) VALUES ($1, $2, $3)',
                         [item.type, item.ticket_id, JSON.stringify(item.payload)]
                     ).catch(() => {});
+                } else {
+                    console.error(`⚠️ Ошибка обработки события ${item.type}:`, e.message);
                 }
             }
         }
-    } catch (e) { /* тихо */ }
+    } catch (e) {
+        console.error('syncOutbox error:', e.message);
+    }
     finally {
         isSyncing = false;
     }
@@ -443,10 +461,10 @@ async function syncOutbox() {
 
 // ---------- СПИСКИ И СВОДКА ----------
 const FILTERS = {
-    active: { label: ' Активные', test: p => p.status === 'open' || p.status === 'in_progress' },
-    overdue: { label: ' Просроченные', test: p => (p.status === 'open' || p.status === 'in_progress') && p.deadline && daysLeft(p.deadline) < 0 },
+    active: { label: '🔥 Активные', test: p => p.status === 'open' || p.status === 'in_progress' },
+    overdue: { label: '🔴 Просроченные', test: p => (p.status === 'open' || p.status === 'in_progress') && p.deadline && daysLeft(p.deadline) < 0 },
     noassign: { label: '👷 Без ответственного', test: p => (p.status === 'open' || p.status === 'in_progress') && !p.assignee },
-    all: { label: ' Все обращения', test: () => true },
+    all: { label: '📦 Все обращения', test: () => true },
 };
 
 async function listToChat(chatId, filterKey) {
@@ -479,11 +497,11 @@ async function buildSummaryText() {
     const soon = active.filter(r => r.payload.deadline && daysLeft(r.payload.deadline) > 0 && daysLeft(r.payload.deadline) <= 3);
     const noAssign = active.filter(r => !r.payload.assignee);
     const dateRu = new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Moscow' });
-    let s = `️ *СВОДКА* — ${dateRu}\n\n`;
+    let s = `☀️ *СВОДКА* — ${dateRu}\n\n`;
     s += `📊 Активных: *${active.length}* (🔴 ${opened.length} открыто / 🟡 ${active.length - opened.length} в работе)\n`;
-    s += ` Просрочено: *${overdue.length}* · ⏰ Срок сегодня: *${today.length}* · 🟠 Ближайшие 3 дня: *${soon.length}*\n`;
+    s += `🔴 Просрочено: *${overdue.length}* · ⏰ Срок сегодня: *${today.length}* · 🟠 Ближайшие 3 дня: *${soon.length}*\n`;
     s += `👷 Без ответственного: *${noAssign.length}*\n`;
-    if (active.length === 0) s += `\n Все обращения закрыты. Отличная работа!`;
+    if (active.length === 0) s += `\n😌 Все обращения закрыты. Отличная работа!`;
     return s;
 }
 
@@ -510,7 +528,7 @@ async function checkStale() {
             const daysToDeadline = p.deadline ? daysLeft(p.deadline) : null;
             const ageDays = Math.floor((Date.now() - new Date(p.createdAt)) / DAY);
             if (daysToDeadline !== null && daysToDeadline >= 0 && daysToDeadline <= 3) {
-                problematic.push(`⏳ *Подходит срок* (осталось ${daysToDeadline} дн.)\n «${esc(p.subject)}» (👷 ${esc(p.assignee) || 'не назначен'})`);
+                problematic.push(`⏳ *Подходит срок* (осталось ${daysToDeadline} дн.)\n🎫 «${esc(p.subject)}» (👷 ${esc(p.assignee) || 'не назначен'})`);
             } else if (!p.assignee && !p.deadline && ageDays >= 3) {
                 problematic.push(`⚠️ *Требует внимания* (нет ответственного и срока, висит ${ageDays} дн.)\n🎫 «${esc(p.subject)}» от ${esc(p.username)}`);
             }
@@ -540,25 +558,25 @@ async function checkDailySummary() {
     } catch (e) { console.error('daily summary error:', e.message); }
 }
 
-// 🆕 ========== ОБРАБОТЧИКИ КОМАНД АДМИНИСТРАТОРОВ ==========
+// ========== ОБРАБОТЧИКИ КОМАНД АДМИНИСТРАТОРОВ ==========
 bot.onText(/\/admin_add/, async (msg) => {
     const userId = msg.from.id;
     if (!(await isAdmin(userId))) {
         return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для выполнения этой команды.');
     }
-    
+
     const parts = msg.text.split(' ');
     if (parts.length < 2) {
         return bot.sendMessage(msg.chat.id, '📝 Использование: `/admin_add <user_id> [имя]`', { parse_mode: 'Markdown' });
     }
-    
+
     const newAdminId = parseInt(parts[1], 10);
     const newAdminName = parts.slice(2).join(' ') || 'Админ';
-    
+
     if (isNaN(newAdminId)) {
         return bot.sendMessage(msg.chat.id, '❌ Неверный формат ID. ID должен быть числом.');
     }
-    
+
     await addAdmin(newAdminId, newAdminName);
     bot.sendMessage(msg.chat.id, `✅ Пользователь *${esc(newAdminName)}* (ID: \`${newAdminId}\`) добавлен в список администраторов.`, { parse_mode: 'Markdown' });
 });
@@ -568,21 +586,21 @@ bot.onText(/\/admin_remove/, async (msg) => {
     if (!(await isAdmin(userId))) {
         return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для выполнения этой команды.');
     }
-    
+
     const parts = msg.text.split(' ');
     if (parts.length < 2) {
         return bot.sendMessage(msg.chat.id, '📝 Использование: `/admin_remove <user_id>`', { parse_mode: 'Markdown' });
     }
-    
+
     const removeId = parseInt(parts[1], 10);
     if (isNaN(removeId)) {
-        return bot.sendMessage(msg.chat.id, ' Неверный формат ID.');
+        return bot.sendMessage(msg.chat.id, '❌ Неверный формат ID.');
     }
-    
+
     if (removeId === userId) {
-        return bot.sendMessage(msg.chat.id, '️ Вы не можете удалить сами себя из списка администраторов.');
+        return bot.sendMessage(msg.chat.id, '⚠️ Вы не можете удалить сами себя из списка администраторов.');
     }
-    
+
     await removeAdmin(removeId);
     bot.sendMessage(msg.chat.id, `✅ Пользователь с ID \`${removeId}\` удалён из списка администраторов.`, { parse_mode: 'Markdown' });
 });
@@ -592,29 +610,28 @@ bot.onText(/\/admins/, async (msg) => {
     if (!(await isAdmin(userId))) {
         return bot.sendMessage(msg.chat.id, '⛔ У вас нет прав для просмотра списка администраторов.');
     }
-    
+
     const admins = await getAdmins();
     if (admins.length === 0) {
         return bot.sendMessage(msg.chat.id, '📋 Список администраторов пуст.');
     }
-    
-    let text = ' *Список администраторов:*\n\n';
+
+    let text = '👥 *Список администраторов:*\n\n';
     admins.forEach((a, i) => {
         text += `${i + 1}. *${esc(a.username)}* (ID: \`${a.user_id}\`)\n   Добавлен: ${new Date(a.added_at).toLocaleDateString('ru-RU')}\n`;
     });
-    
+
     bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
 });
-// 🆕 ========== КОНЕЦ ОБРАБОТЧИКОВ АДМИНИСТРАТОРОВ ==========
+// ========== КОНЕЦ ОБРАБОТЧИКОВ АДМИНИСТРАТОРОВ ==========
 
 // ---------- ОБРАБОТЧИКИ КНОПОК ----------
 const replyWait = new Map();
 bot.on('callback_query', async (q) => {
     const d = q.data;
     const userId = q.from.id;
-    
+
     try {
-        // 🆕 КНОПКИ ЗАЯВОК НА ИНСТРУМЕНТ (без проверки)
         if (d.startsWith('toolreq_approve:') || d.startsWith('toolreq_reject:')) {
             const [action, id] = d.split(':');
             const act = action === 'toolreq_approve' ? 'tool_request_approve' : 'tool_request_reject';
@@ -630,15 +647,13 @@ bot.on('callback_query', async (q) => {
             });
         }
 
-        // 🆕 ПРОВЕРКА ПРАВ ДЛЯ УПРАВЛЕНИЯ ТИКЕТАМИ (Статус, Исполнитель, Срок)
-        // Кнопка "Ответить" (reply) НЕ проверяется - она разрешена всем
-        if (d.startsWith('status:') || d.startsWith('amenu:') || d.startsWith('assign:') || 
+        if (d.startsWith('status:') || d.startsWith('amenu:') || d.startsWith('assign:') ||
             d.startsWith('dlmenu:') || d.startsWith('dl:')) {
-            
+
             if (!(await canChangeStatus(userId))) {
-                return bot.answerCallbackQuery(q.id, { 
+                return bot.answerCallbackQuery(q.id, {
                     text: '⛔ У вас нет прав менять статус, сроки или назначать исполнителя. Вы можете только писать ответы.',
-                    show_alert: true 
+                    show_alert: true
                 });
             }
         }
@@ -717,7 +732,7 @@ bot.onText(/\/summary/, (msg) => sendSummaryNow(msg.chat.id));
 bot.on('message', async (msg) => {
     if (!msg.text) return;
     const t = msg.text.trim();
-    if (t === ' Обращения') return listToChat(msg.chat.id, 'active');
+    if (t === '📋 Обращения') return listToChat(msg.chat.id, 'active');
     if (t === '🔴 Просроченные') return listToChat(msg.chat.id, 'overdue');
     if (t === '👷 Без ответственного') return listToChat(msg.chat.id, 'noassign');
     if (t === '☀️ Сводка') return sendSummaryNow(msg.chat.id);
